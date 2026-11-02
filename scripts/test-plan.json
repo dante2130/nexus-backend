@@ -84,6 +84,11 @@
   [
     "-p",
     "xodus-service",
+    "connection::router::peer::tests"
+  ],
+  [
+    "-p",
+    "xodus-service",
     "token_response_tests"
   ],
   [
