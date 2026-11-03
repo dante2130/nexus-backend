@@ -74,9 +74,9 @@ fn setup() -> (Arc<PausedBackend>, TokenManager) {
 
 #[test]
 fn credential_concurrent_token_merges_preserve_both_addresses() {
-    for key in ["user-session", "user-tokens", "device-tokens"] {
+    for (key,authenticated) in [("user-accounts-v2",true),("user-accounts-v2",false),("device-tokens",false)] {
         let (backend, manager) = setup();
-        if key == "user-session" { session(&manager, "account-a"); }
+        if authenticated { session(&manager, "account-a"); }
         let write = move |m: TokenManager, address: &str| {
             if key == "device-tokens" { m.save_device_token(address.into(), token(address)).unwrap(); }
             else { m.save_user_token(address.into(), token(address)).unwrap(); }
@@ -94,7 +94,7 @@ fn credential_session_replacement_waits_for_in_progress_mutation() {
     let (backend, manager) = setup();
     session(&manager, "account-a");
     interleave(|m| m.save_user_token("refresh-a".into(), token("a")).unwrap(),
-        |m| session(&m, "account-b"), "user-session", &backend, &manager);
+        |m| session(&m, "account-b"), "user-accounts-v2", &backend, &manager);
     assert_eq!(manager.get_user().unwrap().puid, "account-b");
     assert!(manager.get_user_token_for("refresh-a").unwrap().is_none());
 }
@@ -104,7 +104,7 @@ fn credential_logout_waits_for_in_progress_mutation() {
     let (backend, manager) = setup();
     session(&manager, "account-a");
     interleave(|m| m.save_user_token("refresh-a".into(), token("a")).unwrap(),
-        |m| m.remove_persistent().unwrap(), "user-session", &backend, &manager);
+        |m| m.remove_persistent().unwrap(), "user-accounts-v2", &backend, &manager);
     assert!(manager.get_user_sts_session().unwrap().is_none());
     assert!(manager.get_user_token_for("refresh-a").unwrap().is_none());
 }
@@ -128,7 +128,7 @@ fn credential_independent_managers_share_backend_transaction_guard() {
     let independent = TokenManager::new(backend.clone(), Arc::new(MemoryBackend::default()));
     interleave(|m| m.save_user_token("first".into(), token("a")).unwrap(),
         move |_| independent.save_user_token("second".into(), token("b")).unwrap(),
-        "user-session", &backend, &manager);
+        "user-accounts-v2", &backend, &manager);
     assert!(manager.get_user_token_for("first").unwrap().is_some());
     assert!(manager.get_user_token_for("second").unwrap().is_some());
 }

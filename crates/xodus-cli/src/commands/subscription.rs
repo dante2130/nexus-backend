@@ -100,8 +100,8 @@ fn cached(value: &Value, account: &str, now: i64) -> Option<Value> {
 pub(super) async fn store_session(
     tokens: &TokenManager,
     account: &str,
-) -> Result<(reqwest::Client, String), &'static str> {
-    if tokens.get_user().map_err(|_| "stored-account")?.username != account {
+) -> Result<(reqwest::Client, String, xodus::tokens::UserTokenSnapshot), &'static str> {
+    if tokens.get_license_user().map_err(|_| "stored-account")?.username != account {
         return Err("account-changed");
     }
     let client = reqwest::Client::builder()
@@ -110,7 +110,7 @@ pub(super) async fn store_session(
         .user_agent("Xodus-Nexus-membership/0.2.3")
         .build()
         .map_err(|_| "http-client")?;
-    let (selected, device, user) = super::session::prepare(tokens, &client).await.map_err(|stage| {
+    let (selected, device, user, snapshot) = super::session::prepare_license(tokens, &client).await.map_err(|stage| {
         super::session::diagnostic(stage); stage
     })?;
     if selected != account { return Err("account-changed"); }
@@ -133,7 +133,7 @@ pub(super) async fn store_session(
     .await
     .map_err(|error| super::session::classify(&error))
     }).await?;
-    if tokens.get_user().map_err(|_| "account-check")?.username != account { return Err("account-changed"); }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     if let Some(stage) = super::session::rejection(&outcome) { return Err(stage); }
     let token: Token = match outcome {
         ExchangeUserTokenOutcome::Issued(
@@ -148,7 +148,7 @@ pub(super) async fn store_session(
         return Err("store-ticket-type");
     };
     let ticket = valid_store_ticket(ticket).ok_or("store-ticket-format")?;
-    Ok((client, ticket))
+    Ok((client, ticket, snapshot))
 }
 
 /// Delegation-compact tickets have no "&p=" part and arrive as "d=..."; both
@@ -159,7 +159,7 @@ fn valid_store_ticket(ticket: String) -> Option<String> {
 }
 
 async fn query(tokens: &TokenManager, account: &str) -> Result<(Value, i64), &'static str> {
-    let (client, ticket) = store_session(tokens, account).await?;
+    let (client, ticket, snapshot) = store_session(tokens, account).await?;
     let cv = format!(
         "{}.0",
         STANDARD_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes())
@@ -187,29 +187,32 @@ async fn query(tokens: &TokenManager, account: &str) -> Result<(Value, i64), &'s
         }
         bytes.extend_from_slice(&chunk);
     }
-    if tokens.get_user().map_err(|_| "account-check")?.username != account {
-        return Err("account-changed");
-    }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let body: Value = serde_json::from_slice(&bytes).map_err(|_| "membership-json")?;
     summary(&body, chrono::Utc::now().timestamp())
 }
 
 pub async fn lookup(tokens: &TokenManager, account: &str) -> Value {
+    let Ok(snapshot)=tokens.user_token_snapshot_role(xodus::tokens::AccountRole::License) else{return unknown()};
+    if snapshot.stored_user().is_none_or(|u|u.username!=account){return unknown();}
+    let binding=snapshot.cache_binding();
     let entry = xodus::secrets::get_entry(ENTRY).ok();
     if let Some(value) = entry
         .as_ref()
         .and_then(|entry| entry.get_secret().ok())
         .filter(|bytes| bytes.len() < 8192)
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|value|value["binding"].as_str()==Some(binding.as_str()))
         .and_then(|value| cached(&value, account, chrono::Utc::now().timestamp()))
     {
-        return value;
+        return if tokens.validate_user_token_snapshot(&snapshot).is_ok(){value}else{unknown()};
     }
     match tokio::time::timeout(Duration::from_secs(40), query(tokens, account)).await {
         Ok(Ok((sub, until))) => {
+            if tokens.validate_user_token_snapshot(&snapshot).is_err(){return unknown();}
             if let Some(entry) = entry {
                 if let Ok(bytes) = serde_json::to_vec(
-                    &json!({"schema":2,"account":account,"subscription":sub,"validUntil":until}),
+                    &json!({"schema":2,"binding":binding,"account":account,"subscription":sub,"validUntil":until}),
                 ) {
                     let _ = entry.set_secret(&bytes);
                 }

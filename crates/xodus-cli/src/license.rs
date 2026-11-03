@@ -91,14 +91,15 @@ pub async fn get_license(
     cache: Option<&Path>,
     offline: bool,
 ) -> std::result::Result<(DeviceKey, SPLicense), String> {
-    let user = tokens.get_user().map_err(|error| error.to_string())?;
+    let identity=tokens.account_identity_snapshot(xodus::tokens::AccountRole::License).map_err(|e|e.to_string())?;
+    let user=identity.user().clone();
     let holder = holder(tokens, &user);
     if offline {
         // Skip the ticket and license requests and their connect timeouts;
         // the stored license is held to the same rules as after a failed
         // request, so nothing is granted that an unreachable Microsoft would
         // not have allowed.
-        return recover_offline(
+        let recovered=recover_offline(
             tokens,
             cache,
             &content_id,
@@ -106,8 +107,14 @@ pub async fn get_license(
             OnlineFailure::Unreachable("Microsoft is unreachable (offline launch requested).".to_string()),
             unix_now(),
         );
+        tokens.validate_account_identity(&identity).map_err(|e|e.to_string())?;
+        return recovered;
     }
-    match fetch_online(client, tokens, &user, content_id.clone(), market.clone()).await {
+    let snapshot=tokens.user_token_snapshot_role(xodus::tokens::AccountRole::License).map_err(|e|e.to_string())?;
+    tokens.validate_account_identity(&identity).map_err(|e|e.to_string())?;
+    let result=fetch_online(client, tokens, &user, &snapshot, content_id.clone(), market.clone()).await;
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|e|e.to_string())?;
+    let material=match result {
         Ok(license) => {
             let material = license_material(tokens, &license.key.splicense_block)?;
             if let Some(root) = cache {
@@ -116,7 +123,9 @@ pub async fn get_license(
             Ok(material)
         }
         Err(failure) => recover_offline(tokens, cache, &content_id, holder.as_ref(), failure, unix_now()),
-    }
+    };
+    tokens.validate_account_identity(&identity).map_err(|e|e.to_string())?;
+    material
 }
 
 /// Microsoft's answer is authoritative for this device: an offline lease is
@@ -297,6 +306,7 @@ async fn fetch_online(
     client: &reqwest::Client,
     tokens: &TokenManager,
     user: &User,
+    snapshot: &xodus::tokens::UserTokenSnapshot,
     content_id: String,
     market: String,
 ) -> Result<OnlineLicense, OnlineFailure> {
@@ -307,9 +317,7 @@ async fn fetch_online(
     let Token::Legacy(dev_token) = dev_token else {
         return Err(other("Invalid STS token".to_string()));
     };
-    let user_token = tokens
-        .get_user_sts_token()
-        .map_err(|error| other(error.to_string()))?;
+    let user_token=snapshot.token();
     let Token::Legacy(legacy) = user_token else {
         return Err(other("Unspported user token".to_string()));
     };

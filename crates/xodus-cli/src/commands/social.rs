@@ -121,11 +121,12 @@ async fn execute(tokens: &TokenManager, op: &Operation) -> Result<Value, &'stati
         let (value, account) = chat_session::send(tokens, peer, message).await?;
         return Ok(json!({"schema":1,"account":account,"result":value}));
     }
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     // Existing bounded, silent Xbox session path; no new client identity or login.
     let (client, authorization, account) = super::profile::xbox_session(tokens).await?;
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account { return Err("account-changed"); }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let value = call(&client,&authorization,op,plan(op)).await?;
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account { return Err("account-changed"); }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     Ok(json!({"schema":1,"account":account,"result":value}))
 }
 async fn call(client: &reqwest::Client, authorization: &str, op: &Operation, plan: Plan) -> Result<Value, &'static str> {

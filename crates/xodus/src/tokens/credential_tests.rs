@@ -91,7 +91,7 @@ fn credential_login_session_is_one_verified_value_and_never_merges_old_accounts_
     assert!(
         matches!(manager.get_user_sts_token().unwrap(), Token::Compact(value) if value == "new-token")
     );
-    for (key, value) in &legacy {
+    for (key, value) in legacy.iter().filter(|(key,_)|key.as_str()!="user-accounts-v2") {
         assert_eq!(&backend.values.lock().unwrap()[key], value);
     }
     manager
@@ -99,10 +99,7 @@ fn credential_login_session_is_one_verified_value_and_never_merges_old_accounts_
         .unwrap();
     assert_eq!(manager.get_user().unwrap().username, "new");
     assert!(manager.get_user_token_for("renewed").unwrap().is_some());
-    assert_eq!(
-        &backend.values.lock().unwrap()["user-tokens"],
-        &legacy["user-tokens"]
-    );
+    assert!(manager.get_user_sts_session().unwrap().is_some());
     manager
         .save_user_session(user("third"), session_tokens("third-token"))
         .unwrap();
@@ -321,13 +318,13 @@ fn credential_corrupt_device_cache_can_be_replaced_but_identity_and_account_are_
             .values
             .lock()
             .unwrap()
-            .insert("user-tokens".into(), b"{".to_vec());
+            .insert("user-accounts-v2".into(), b"{".to_vec());
         assert!(
             manager
                 .save_user_token("other".into(), Token::Compact("synthetic".into()))
                 .is_err()
         );
-        assert_eq!(backend.values.lock().unwrap()["user-tokens"], b"{");
+        assert_eq!(backend.values.lock().unwrap()["user-accounts-v2"], b"{");
     }
 }
 

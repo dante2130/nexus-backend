@@ -70,20 +70,27 @@ fn social_cache_key(account:&str,user:&xodus::models::secrets::LegacyToken,audie
     Ok(format!("nexus-social-bearer:{:016x}",hash.finish()))
 }
 pub(super) fn invalidate_social_session(tokens:&TokenManager){
-    let Ok(account)=tokens.get_user()else{return};
-    let Ok(Token::Legacy(user))=tokens.get_user_sts_token()else{return};
+    let Ok(snapshot)=tokens.user_token_snapshot()else{return};
+    let Some(account)=snapshot.stored_user()else{return};
+    let Token::Legacy(user)=snapshot.token()else{return};
     for audience in ["http://xboxlive.com","http://gssv.xboxlive.com/"]{
-        if let Ok(key)=social_cache_key(&account.username,&user,audience){tokens.remove_cached_xsts(&key);}
+        if let Ok(key)=social_cache_key(&format!("{}:{}",account.username,snapshot.cache_binding()),&user,audience){tokens.remove_cached_xsts(&key);}
     }
 }
 
 pub(super) async fn xbox_session_for(tokens: &TokenManager, audience: &str) -> Result<(reqwest::Client, String, String, Option<String>), &'static str> {
+    xbox_session_role(tokens, audience, false).await
+}
+
+/// `license` selects the Store/Game Pass account instead of the player account.
+async fn xbox_session_role(tokens: &TokenManager, audience: &str, license: bool) -> Result<(reqwest::Client, String, String, Option<String>), &'static str> {
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
         .timeout(super::session::REQUEST_TIMEOUT).user_agent("xodus-nexus-profile/1").build().map_err(|_| "http-client")?;
-    let (account, device, user) = super::session::prepare(tokens, &client).await.map_err(|stage| {
+    let prepared = if license { super::session::prepare_license(tokens, &client).await } else { super::session::prepare(tokens, &client).await };
+    let (account, device, user, snapshot) = prepared.map_err(|stage| {
         super::session::diagnostic(stage); stage
     })?;
-    let cache_key=social_cache_key(&account,&user,audience)?;
+    let cache_key=social_cache_key(&format!("{}:{}",account,snapshot.cache_binding()),&user,audience)?;
     let cached=tokens.get_cached_xsts(&cache_key).filter(|t|t.not_after>chrono::Utc::now()+chrono::Duration::seconds(60));
     if std::env::var_os("NEXUS_SOCIAL_TRACE_CACHE").is_some(){eprintln!("NEXUS_SOCIAL_CACHE_DIAGNOSTIC_V1 {}",if cached.is_some(){"hit"}else{"miss"});}
     let xsts=if let Some(token)=cached{token}else{
@@ -103,18 +110,21 @@ pub(super) async fn xbox_session_for(tokens: &TokenManager, audience: &str) -> R
     let user = xodus::api::xbox::authenticate_xbox_user(&client, ticket).await.map_err(|e|auth_failure("xbox-user",e))?;
     let xsts = xodus::api::xbox::request_xsts_token(&client, user.token, audience).await.map_err(|e|auth_failure("xsts",e))?;
     if xsts.user_hash().is_none_or(str::is_empty){return Err("xsts-claim");}
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     tokens.cache_xsts(&cache_key,&xsts);xsts};
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let uhs = xsts.user_hash().ok_or("xsts-claim")?;
     let identity = xsts.user_id().map(str::to_owned);
     let authorization = format!("XBL3.0 x={uhs};{}", xsts.token);
     Ok((client, authorization, account, identity))
 }
 
-async fn profile(tokens: &TokenManager) -> Result<Value, &'static str> {
-    let (client, authorization, account) = xbox_session(tokens).await?;
+async fn profile(tokens: &TokenManager, license: bool) -> Result<Value, &'static str> {
+    let snapshot=tokens.user_token_snapshot_role(if license{xodus::tokens::AccountRole::License}else{xodus::tokens::AccountRole::Xbox}).map_err(|_|"stored-account")?;
+    let (client, authorization, account, _) = xbox_session_role(tokens, "http://xboxlive.com", license).await?;
     let response = client.get(PROFILE).header("Authorization", authorization)
         .header("x-xbl-contract-version", "2").send().await.map_err(|_| "profile-request")?;
-    if response.status().as_u16()==401{invalidate_social_session(tokens);}
+    if response.status().as_u16()==401 && !license {invalidate_social_session(tokens);}
     let body = bounded(response, 128 * 1024).await?;
     let (gamertag, picture) = fields(&serde_json::from_slice(&body).map_err(|_| "profile-json")?)?;
     // Fresh request, no Authorization/Signature or redirects to the image CDN.
@@ -124,24 +134,30 @@ async fn profile(tokens: &TokenManager) -> Result<Value, &'static str> {
             Err(_) => None,
         }
     } else { None };
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account { return Err("account-changed"); }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     Ok(json!({ "schema": 1, "account": account, "gamertag": gamertag, "gamerpicDataUrl": image }))
 }
 
-pub async fn run(tokens: &TokenManager, json_output: bool) -> ExitCode {
-    let account = tokens.get_user().ok().map(|user|user.username);
+pub async fn run(tokens: &TokenManager, json_output: bool, license: bool) -> ExitCode {
+    let output_snapshot=tokens.user_token_snapshot_role(if license{xodus::tokens::AccountRole::License}else{xodus::tokens::AccountRole::Xbox}).ok();
+    let account = if license{tokens.get_license_user()}else{tokens.get_user()}.ok().map(|user|user.username);
+    // Game Pass membership belongs to the license account, which is the player
+    // account unless a separate one is stored.
+    let license_snapshot=tokens.user_token_snapshot_role(xodus::tokens::AccountRole::License).ok();
+    let license_account=license_snapshot.as_ref().and_then(|s|s.stored_user()).map(|u|u.username.clone());
     let membership = async {
-        match account.as_deref() {
+        match license_account.as_deref() {
             Some(account) => super::subscription::lookup(tokens, account).await,
             None => json!({"status":"unknown"}),
         }
     };
     // Independent optional membership lookup must not delay the profile request
     // beyond its existing deadline or trigger interactive authentication.
-    let (result, subscription) = tokio::join!(tokio::time::timeout(Duration::from_secs(45), profile(tokens)), membership);
+    let (result, subscription) = tokio::join!(tokio::time::timeout(Duration::from_secs(45), profile(tokens, license)), membership);
     match result {
         Ok(Ok(mut value)) => {
-            if value["account"].as_str() == account.as_deref() { value["subscription"] = subscription; }
+            if output_snapshot.as_ref().is_none_or(|s|tokens.validate_user_token_snapshot(s).is_err()){super::session::diagnostic("account-changed");return ExitCode::FAILURE;}
+            if value["account"].as_str() == account.as_deref() { value["subscription"] = if license_snapshot.as_ref().is_some_and(|s|tokens.validate_user_token_snapshot(s).is_ok()){subscription}else{json!({"status":"unknown"})}; }
             if json_output { println!("{value}"); } else { println!("{}", value["gamertag"].as_str().unwrap_or_default()); }
             ExitCode::SUCCESS
         }

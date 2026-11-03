@@ -85,6 +85,20 @@ enum SubCommand {
         #[arg(short, long, help = "Path to a keyfile with content decryption keys")]
         key_file: Option<String>,
     },
+    #[command(about = "List, switch to or forget saved Store/Game Pass accounts")]
+    SavedAccounts {
+        /// Explicitly retain Store accounts for later switching.
+        #[arg(long, conflicts_with_all = ["use_account", "forget"])]
+        enable: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Make this saved account the active Store/Game Pass account.
+        #[arg(long = "use", conflicts_with = "forget")]
+        use_account: Option<String>,
+        /// Forget this saved account.
+        #[arg(long)]
+        forget: Option<String>,
+    },
     #[command(about = "Show whether Xodus has a stored Microsoft account")]
     Account {
         #[arg(long, default_value_t = false)]
@@ -94,6 +108,9 @@ enum SubCommand {
     Profile {
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Read the profile of the Store/Game Pass (license) account.
+        #[arg(long, default_value_t = false)]
+        license: bool,
     },
     #[command(about = "Extended native Nexus social services") ]
     NativeSocial {
@@ -124,10 +141,15 @@ enum SubCommand {
         #[arg(long, default_value = "US")]
         market: String,
     },
-    Login,
+    Login {
+        #[arg(long, default_value_t = false, help = "Sign in the Xbox player account instead of the license account")]
+        player: bool,
+    },
     Logout {
         #[arg(long, default_value_t = false, help = "Remove device license")]
         device: bool,
+        #[arg(long, default_value_t = false, help = "Sign out only the Xbox player account")]
+        player: bool,
     },
     #[command(about = "Download and extract the game through streaming algorithm")]
     #[command(after_help = "Nexus capabilities: update-recovery-v1")]
@@ -321,6 +343,7 @@ async fn main() -> ExitCode {
     let needs_device_credentials = !matches!(
         args.command,
         SubCommand::Account { .. }
+            | SubCommand::SavedAccounts { .. }
             | SubCommand::Profile { .. }
             | SubCommand::Social { .. }
             | SubCommand::NativeSocial { .. }
@@ -387,41 +410,29 @@ async fn main() -> ExitCode {
             .await
         }
         SubCommand::Library { json, market } => commands::library::run(&tokens, json, market).await,
-        SubCommand::Account { json } => match tokens.get_user() {
-            Ok(user) => {
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "stored": true,
-                            "username": user.username,
-                        })
-                    );
-                } else {
-                    println!("{}", user.username);
-                }
+        SubCommand::SavedAccounts { json, use_account, forget, enable } => {
+            let changed=if enable {tokens.enable_saved_accounts()} else if let Some(name)=use_account {tokens.activate_saved_account(&name)} else if let Some(name)=forget {tokens.forget_saved_account(&name)} else {Ok(())};
+            if let Err(error)=changed {error.report();return ExitCode::FAILURE;}
+            match tokens.saved_account_status(){
+                Ok((enabled,accounts,active))=>{if json {println!("{}",saved_account_json(enabled,accounts,active));}else{for name in accounts{println!("{name}");}}ExitCode::SUCCESS},
+                Err(error)=>{error.report();ExitCode::FAILURE}
+            }
+        }
+        SubCommand::Account { json } => match tokens.account_users() {
+            Ok((store,player))=>{
+                if json {println!("{}",account_json(store,player));}
+                else if let Some(user)=store {println!("{}",user.username);}else{println!("No stored Microsoft account");}
                 ExitCode::SUCCESS
-            }
-            Err(xodus::tokens::store::TokenStoreError::NotFound) => {
-                if json {
-                    println!("{}", serde_json::json!({ "stored": false }));
-                } else {
-                    println!("No stored Microsoft account");
-                }
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("Unable to read the stored account: {error}");
-                ExitCode::FAILURE
-            }
+            },
+            Err(error)=>{error.report();ExitCode::FAILURE}
         },
-        SubCommand::Profile { json } => commands::profile::run(&tokens, json).await,
+        SubCommand::Profile { json, license } => commands::profile::run(&tokens, json, license).await,
         SubCommand::NativeSocial { action } => commands::native_social::run(&tokens,action).await,
         SubCommand::Social { .. } => commands::social::run(&tokens).await,
         SubCommand::GameActivity { title_id, json } => commands::game_activity::run(&tokens, title_id, json).await,
         SubCommand::Achievements { title_id, json } => commands::achievements::run(&tokens, title_id, json).await,
-        SubCommand::Login => commands::login::run(&client, &tokens).await,
-        SubCommand::Logout { device } => commands::logout::run(&tokens, device).await,
+        SubCommand::Login { player } => commands::login::run(&client, &tokens, player).await,
+        SubCommand::Logout { device, player } => commands::logout::run(&tokens, device, player).await,
         SubCommand::Extract {
             path,
             destination,
@@ -508,4 +519,31 @@ async fn main() -> ExitCode {
     xodus::secrets::destroy_secrets();
 
     code
+}
+
+fn account_json(store:Option<xodus::models::secrets::User>,player:Option<xodus::models::secrets::User>)->serde_json::Value{
+    serde_json::json!({"stored":store.is_some(),"username":store.as_ref().map(|u|&u.username),"player":player.as_ref().map(|u|serde_json::json!({"username":u.username}))})
+}
+fn saved_account_json(enabled:bool,accounts:Vec<String>,active:Option<String>)->serde_json::Value{
+    serde_json::json!({"enabled":enabled,"accounts":accounts,"active":active})
+}
+
+#[cfg(test)]
+mod account_cli_tests {
+    use super::*;
+    #[test]
+    fn account_cli_json_and_help_preserve_single_and_player_only_contract(){
+        use clap::CommandFactory;
+        let user=||xodus::models::secrets::User{username:"synthetic@example.invalid".into(),puid:"synthetic".into()};
+        let single=account_json(Some(user()),None);assert_eq!(single["stored"],true);assert!(single["player"].is_null());
+        let player=account_json(None,Some(user()));assert_eq!(player["stored"],false);assert_eq!(player["player"]["username"],"synthetic@example.invalid");
+        let vault=saved_account_json(false,vec![],None);assert_eq!(vault["enabled"],false);
+        let mut cmd=CliArgs::command();let mut help=vec![];cmd.find_subcommand_mut("saved-accounts").unwrap().write_long_help(&mut help).unwrap();let help=String::from_utf8(help).unwrap();assert!(help.contains("--enable"));assert!(help.contains("--use"));assert!(help.contains("--forget"));
+        println!("SYNTHETIC_ACCOUNT_SINGLE {single}\nSYNTHETIC_ACCOUNT_PLAYER_ONLY {player}\nSYNTHETIC_SAVED {vault}\nSAVED_ACCOUNTS_HELP\n{help}");
+    }
+    #[test]
+    fn saved_account_retention_is_explicit_and_mutations_are_exclusive(){
+        assert!(matches!(CliArgs::try_parse_from(["xodus-cli","saved-accounts","--enable","--json"]).unwrap().command,SubCommand::SavedAccounts{enable:true,..}));
+        for args in [vec!["xodus-cli","saved-accounts","--enable","--use","a"],vec!["xodus-cli","saved-accounts","--enable","--forget","a"],vec!["xodus-cli","saved-accounts","--use","a","--forget","a"]]{assert!(CliArgs::try_parse_from(args).is_err());}
+    }
 }

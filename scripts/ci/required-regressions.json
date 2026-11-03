@@ -229,7 +229,7 @@
   },
   {
     "file": "crates/xodus-service/src/account_metadata.rs",
-    "name": "account_metadata_uses_real_session_ids_and_rejects_mixed_accounts"
+    "name": "account_metadata_uses_independently_bound_role_ids"
   },
   {
     "file": "crates/xodus-service/src/account_metadata.rs",
@@ -870,5 +870,69 @@
   {
     "file": "crates/msixvc/src/encrypted_image_tests.rs",
     "name": "streaming_update_verifier_checks_licensed_plaintext_ciphertext_wrong_keys_and_modified_pages"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_legacy_cleanup_follows_tombstone_and_failure_never_restores_session"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_offline_identity_guard_needs_no_ticket_and_rejects_same_name_aba"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_uncertain_enable_and_partial_device_failure_are_reconcilable"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_partial_user_write_cannot_relabel_authenticated_ticket"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_retention_requires_explicit_enable_and_collapse_does_not_clear"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_role_isolation_and_fallback_aba"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_refresh_updates_only_same_role_active_session_and_vault"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_signed_out_tombstone_never_revives_retained_v1"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_empty_reads_do_not_provision_and_corrupt_v2_never_falls_back"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_failed_atomic_write_preserves_both_roles_and_vault"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_username_collision_rejects_without_overwriting_saved_identity"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_pending_login_is_role_bound_and_device_revocation_wins"
+  },
+  {
+    "file": "crates/xodus/src/tokens/accounts.rs",
+    "name": "account_state_malformed_player_cannot_become_effective_identity"
+  },
+  {
+    "file": "crates/xodus-cli/src/commands/session.rs",
+    "name": "credential_session_same_name_saved_activation_and_player_aba_are_rejected"
+  },
+  {
+    "file": "crates/xodus-cli/src/main.rs",
+    "name": "saved_account_retention_is_explicit_and_mutations_are_exclusive"
+  },
+  {
+    "file": "crates/xodus-cli/src/main.rs",
+    "name": "account_cli_json_and_help_preserve_single_and_player_only_contract"
   }
 ]

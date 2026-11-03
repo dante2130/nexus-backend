@@ -87,6 +87,7 @@ fn page(value: &Value, title: u32) -> Result<(Vec<Value>,Option<String>,bool), &
 }
 
 async fn lookup(tokens: &TokenManager, title: u32) -> Result<Value, &'static str> {
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     let (client,authorization,account) = xbox_session(tokens).await?;
     let response = client.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag")
         .header("Authorization",&authorization).header("x-xbl-contract-version","2")
@@ -113,7 +114,7 @@ async fn lookup(tokens: &TokenManager, title: u32) -> Result<Value, &'static str
         if items.len() == 500 || index == 9 { partial = true; break; }
         token = Some(next);
     }
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account { return Err("account-changed"); }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     Ok(json!({"schema":1,"account":account,"titleId":title.to_string(),"items":items,"partial":partial}))
 }
 

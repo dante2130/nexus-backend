@@ -11,6 +11,11 @@
   [
     "-p",
     "xodus",
+    "account_state_"
+  ],
+  [
+    "-p",
+    "xodus",
     "keyring_unlock_",
     "--",
     "--test-threads=1"

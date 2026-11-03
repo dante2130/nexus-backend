@@ -1,16 +1,8 @@
 use std::process::ExitCode;
 use xodus::tokens::TokenManager;
 
-pub async fn run(tokens: &TokenManager, device: bool) -> ExitCode {
+pub async fn run(tokens: &TokenManager, device: bool, player: bool) -> ExitCode {
     super::subscription::clear();
-    if device && tokens.remove_device_license().is_err() {
-        return ExitCode::FAILURE;
-    }
-    match tokens.remove_persistent() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            tracing::error!("Failed to logout {err}");
-            ExitCode::FAILURE
-        }
-    }
+    let result=if device {tokens.remove_all_accounts_and_device()} else if player {tokens.remove_player()} else {tokens.remove_license()};
+    match result {Ok(())=>ExitCode::SUCCESS,Err(error)=>{error.report();ExitCode::FAILURE}}
 }

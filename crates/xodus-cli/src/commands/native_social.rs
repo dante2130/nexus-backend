@@ -330,6 +330,7 @@ async fn people_execute(tokens:&TokenManager,builder:reqwest::RequestBuilder,aut
     bounded(response,4*1024*1024).await.map_err(|_|if mutation{"people-mutation-uncertain"}else{"people-response-size"})
 }
 async fn people_request(tokens:&TokenManager,input:&str)->Result<Value,&'static str>{
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     let mut input=people_input(input)?;people_account(tokens,&input.account)?;
     let(_,authorization,account,own)=xbox_session_identity(tokens).await?;
     // Disable even reqwest's protocol-NACK retries for explicit relationship actions.
@@ -353,9 +354,9 @@ async fn people_request(tokens:&TokenManager,input:&str)->Result<Value,&'static 
         };
         if !people_mutation_allowed(&input.operation,&state){return Err("people-relationship-changed");}
     }
-    people_account(tokens,&account)?;
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let bytes=people_execute(tokens,people_builder(&client,&input,&own)?,&authorization,input.mutation()).await?;
-    people_account(tokens,&account)?;
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let result=if input.mutation(){json!({"xuid":input.target()?,"success":true})}
     else{
         let value:Value=serde_json::from_slice(&bytes).map_err(|_|"people-json")?;
@@ -381,10 +382,11 @@ async fn people_request(tokens:&TokenManager,input:&str)->Result<Value,&'static 
             _=>people_page(&value)?,
         }
     };
-    people_account(tokens,&account)?;
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     Ok(json!({"schema":1,"kind":"people","account":account,"operation":input.operation,"result":result}))
 }
 async fn request(tokens: &TokenManager, mut action: Action, input:Option<&str>) -> Result<Value, &'static str> {
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     if matches!(action,Action::Party){return super::native_social_party::request(tokens,input.ok_or("party-input")?).await;}
     if matches!(action,Action::People){return people_request(tokens,input.ok_or("people-input")?).await;}
     // Validate stdin before accessing credentials or the network.
@@ -410,7 +412,7 @@ async fn request(tokens: &TokenManager, mut action: Action, input:Option<&str>) 
         let bytes=bounded(response,64*1024).await?;
         let value:Value=serde_json::from_slice(&bytes).map_err(|_|"chat-auth-json")?;
         let key=value["AuthKey"].as_str().filter(|s|!s.is_empty()&&s.len()<=16*1024&&!s.chars().any(char::is_control)).ok_or("chat-auth-key")?;
-        if tokens.get_user().map_err(|_| "account-changed")?.username != account {return Err("account-changed");}
+        tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
         return Ok(json!({"schema":1,"kind":"chat-auth","account":account,"xuid":self_xuid,"authKey":key}));
     }
     let (kind, builder) = match &action {
@@ -434,7 +436,7 @@ async fn request(tokens: &TokenManager, mut action: Action, input:Option<&str>) 
     }
     let bytes=bounded(response,4*1024*1024).await?;
     let value:Value=serde_json::from_slice(&bytes).map_err(|_| "social-json")?;
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account {return Err("account-changed");}
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let items=match action {
         Action::Friends => friends(&value)?,
         Action::Inbox => inbox(&value,&self_xuid)?,
@@ -447,7 +449,7 @@ async fn request(tokens: &TokenManager, mut action: Action, input:Option<&str>) 
     };
     // Return inbox immediately. Optional names and pictures are resolved lazily
     // by the UI; never block this shared transport on up to 100 profile reads.
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account {return Err("account-changed");}
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     let mut result=json!({"schema":1,"account":account,"kind":kind,"items":items});
     if kind=="invites" {result["recipient"]=json!(self_xuid);}
     Ok(result)

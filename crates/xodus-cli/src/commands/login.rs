@@ -10,15 +10,12 @@ pub(super) const CLIENT_ID: &str = "000000004424da1f";
 const LOGIN_MARKET: &str = "en-US";
 const USER_AUTH_SCOPE: &str = "scope=service::user.auth.xboxlive.com::MBI_SSL&api-version=2.0";
 
-pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
+/// `player` signs in the separate Xbox player account instead of the account
+/// that owns the games or subscription.
+pub async fn run(client: &reqwest::Client, tokens: &TokenManager, player: bool) -> ExitCode {
     super::subscription::clear();
-    let token = match tokens.get_device_sts_token() {
-        Ok(token) => token,
-        Err(error) => {
-            error.report();
-            return ExitCode::FAILURE;
-        }
-    };
+    let role=if player {xodus::tokens::AccountRole::Xbox}else{xodus::tokens::AccountRole::License};
+    let (attempt,token)=match tokens.begin_role_login(role){Ok(value)=>value,Err(error)=>{error.report();return ExitCode::FAILURE;}};
     let secrets::Token::Legacy(token) = token else {
         eprintln!("Invalid STS token");
         return ExitCode::FAILURE;
@@ -70,7 +67,8 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
         };
         issued.insert(address, token);
     }
-    if let Err(error) = tokens.save_user_session(user, issued) {
+    let saved=tokens.complete_role_login(&attempt,user,issued);
+    if let Err(error) = saved {
         error.report();
         return ExitCode::FAILURE;
     }

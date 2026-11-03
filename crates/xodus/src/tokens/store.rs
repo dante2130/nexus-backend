@@ -44,6 +44,10 @@ pub enum TokenStoreError {
     DeviceAuthentication,
     #[error("The signed-in session changed while authenticating. Try again.")]
     SessionChanged,
+    #[error("Saved account limit reached. Forget a saved Store account before adding another.")]
+    AccountCapacity,
+    #[error("This saved account name belongs to a different Microsoft identity. Forget it explicitly before replacing it.")]
+    AccountConflict,
 }
 
 impl TokenStoreError {
@@ -57,6 +61,8 @@ impl TokenStoreError {
             Self::WriteVerification => "keyring-write-verification",
             Self::DeviceAuthentication => "device-authentication",
             Self::SessionChanged => "session-changed",
+            Self::AccountCapacity => "saved-account-limit",
+            Self::AccountConflict => "saved-account-conflict",
         }
     }
     pub fn report(&self) {
