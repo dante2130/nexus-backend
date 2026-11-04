@@ -34,8 +34,8 @@ test('account-free gates, keyring serialization and ignored bandwidth fixtures r
   const plan=JSON.parse(fs.readFileSync(new URL('scripts/test-plan.json',root)));
   const has=(crate,filter)=>plan.some(args=>args[0]==='-p'&&args[1]===crate&&args[2]===filter);
   assert.ok(has('xodus-cli',undefined));
-  for(const filter of ['credential_','content_license_','smbios_','content_ticket_','xbox_delegation_ticket_','ticket_diagnostic_']) assert.ok(has('xodus',filter),filter);
-  for(const filter of ['store_','account_metadata_','deadline_tests','token_response_tests','pooling_tests']) assert.ok(has('xodus-service',filter),filter);
+  for(const filter of ['credential_','account_state_','content_license_','smbios_','content_ticket_','xbox_delegation_ticket_','ticket_diagnostic_']) assert.ok(has('xodus',filter),filter);
+  for(const filter of ['store_','account_metadata_','deadline_tests','connection::router::peer::tests','token_response_tests','pooling_tests']) assert.ok(has('xodus-service',filter),filter);
   for(const filter of ['streaming_','crypt::tests','streaming::tests','package_metadata']) assert.ok(has('msixvc',filter),filter);
   for(const filter of ['keyring_unlock_','keyring_create_','keyring_session_','keyring_persistence_'])
     assert.ok(plan.some(args=>args[1]==='xodus'&&args[2]===filter&&args.includes('--test-threads=1')));

@@ -20,3 +20,6 @@ base64 = { workspace = true }
 
 [features]
 tokio_console = ["dep:console-subscriber"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["poll"] }

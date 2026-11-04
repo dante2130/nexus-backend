@@ -24,7 +24,8 @@ pub async fn get_packages(
     let Token::Legacy(dev_token) = dev_token else {
         return Err(Box::new(std::io::Error::other("Invalid STS token")));
     };
-    let user_token = tokens.get_user_sts_token()?;
+    let snapshot=tokens.user_token_snapshot_role(xodus::tokens::AccountRole::License)?;
+    let user_token=snapshot.token();
     let Token::Legacy(legacy) = user_token else {
         return Err(Box::new(std::io::Error::other("Unsupported user token")));
     };
@@ -55,6 +56,7 @@ pub async fn get_packages(
             "Package was not found, is it owned by the user?",
         )));
     };
+    tokens.validate_user_token_snapshot(&snapshot)?;
     Ok(package)
 }
 

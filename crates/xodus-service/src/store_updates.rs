@@ -105,7 +105,8 @@ async fn check(context: &SimpleContext, request: Request) -> Result<String, Chec
     let id = content_ids.pop().ok_or(FAIL)?;
     if id.len() != 36 || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') { return Err(FAIL.into()); }
     let device = context.device_token.clone().ok_or(DENIED)?;
-    let Token::Legacy(user) = context.tokens().get_user_sts_token().map_err(|_| DENIED)? else { return Err(DENIED.into()); };
+    let snapshot=context.tokens().user_token_snapshot_role(xodus::tokens::AccountRole::License).map_err(|_|DENIED)?;
+    let Token::Legacy(user)=snapshot.token() else{return Err(DENIED.into())};
     let client = context.client.clone();
     // Reuse upstream download authentication, but contain its panic-based errors
     // in a task so a failed Xbox request cannot terminate this service.
@@ -133,6 +134,7 @@ async fn check(context: &SimpleContext, request: Request) -> Result<String, Chec
         .map_err(|hr| version_error(hr, "latest-version", &package.version))?;
     compare(&request.installed_version, &latest)
         .map_err(|hr| version_error(hr, "version-comparison", &latest))?;
+    context.tokens().validate_user_token_snapshot(&snapshot).map_err(|_|DENIED)?;
     Ok(latest)
 }
 

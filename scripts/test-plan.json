@@ -11,6 +11,11 @@
   [
     "-p",
     "xodus",
+    "account_state_"
+  ],
+  [
+    "-p",
+    "xodus",
     "keyring_unlock_",
     "--",
     "--test-threads=1"
@@ -80,6 +85,11 @@
     "-p",
     "xodus-service",
     "deadline_tests"
+  ],
+  [
+    "-p",
+    "xodus-service",
+    "connection::router::peer::tests"
   ],
   [
     "-p",

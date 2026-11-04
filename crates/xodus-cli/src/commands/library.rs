@@ -103,8 +103,8 @@ async fn query(tokens: &TokenManager, market: &str) -> Result<Value, &'static st
     if market.len() != 2 || !market.bytes().all(|b| b.is_ascii_uppercase()) {
         return Err("market");
     }
-    let account = tokens.get_user().map_err(|_| "stored-account")?.username;
-    let (client, ticket) = super::subscription::store_session(tokens, &account).await?;
+    let account = tokens.get_license_user().map_err(|_| "stored-account")?.username;
+    let (client, ticket, snapshot) = super::subscription::store_session(tokens, &account).await?;
     let mut all = Entitlements::default();
     let mut continuation: Option<String> = None;
     let mut seen = HashSet::new();
@@ -158,9 +158,7 @@ async fn query(tokens: &TokenManager, market: &str) -> Result<Value, &'static st
         let page: Value = serde_json::from_slice(&bytes).map_err(|_| "entitlements-json")?;
         all.add(&page)?;
         if continuation.is_none() {
-            if tokens.get_user().map_err(|_| "account-check")?.username != account {
-                return Err("account-changed");
-            }
+            tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
             all.finish();
             for (reason, count) in &all.reasons { diagnostic(reason, 0, *count); }
             diagnostic(if all.skipped > 0 { "partial" } else { "complete" }, 0, all.skipped);

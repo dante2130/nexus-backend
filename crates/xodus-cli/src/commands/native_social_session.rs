@@ -16,13 +16,14 @@ const SISU: &str = "https://sisu.xboxlive.com/authorize";
 const XSTS: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
 
 struct Session {
+    snapshot:xodus::tokens::UserTokenSnapshot,
     client: Client,
     signer: RequestSigner,
     authorization: String,
     account: String,
-    principal: String,
 }
 
+#[cfg(test)]
 fn account_unchanged(tokens: &TokenManager, account: &str, principal: &str) -> Result<(), &'static str> {
     let Some((user, _)) = tokens.get_user_sts_session().map_err(|_| "account-changed")? else { return Err("account-changed"); };
     if user.username != account || user.puid != principal { return Err("account-changed"); }
@@ -109,13 +110,12 @@ impl Session {
     async fn new(tokens: &TokenManager, expected: &str) -> Result<Self, &'static str> {
         let client = Client::builder().redirect(reqwest::redirect::Policy::none())
             .timeout(super::super::session::REQUEST_TIMEOUT).user_agent("xodus-nexus-social/1").build().map_err(|_| "http-client")?;
-        let (account, device, user) = super::super::session::prepare(tokens, &client).await?;
+        let (account, device, user, snapshot) = super::super::session::prepare(tokens, &client).await?;
         // An outgoing write must use the actual account/ticket pair stored by
         // sign-in, not independent legacy records that can belong to two sessions.
-        let Some((bound_user, Token::Legacy(bound_token))) = tokens.get_user_sts_session().map_err(|_| "sign-in-required")? else { return Err("sign-in-required"); };
-        if bound_user.username != account || bound_user.puid.is_empty() || bound_token.token != user.token { return Err("account-changed"); }
-        if account != expected { return Err("account-changed"); }
-        let principal = bound_user.puid;
+        if account!=expected{return Err("account-changed");}
+        let bound_user=snapshot.user().ok_or("sign-in-required")?;
+        if bound_user.puid.is_empty(){return Err("sign-in-required");}
         let app = super::super::login::CLIENT_ID;
         let scope = format!("scope=xboxlive.signin&api-version=2.0&clientid={app}");
         let outcome = xodus::api::live::exchange_user_token(&client, user, account.clone(), device.clone(), None, Some("Silent".into()), app.into(),
@@ -149,8 +149,8 @@ impl Session {
                 "SandboxId":"RETAIL","DeviceToken":device_token,"TitleToken":title_token,"UserTokens":[user_token]}}));
         let xsts = response(signed(request, &mut signer).await?.send().await.map_err(|_| "chat-xsts-request")?, "chat-xsts-http", false).await?;
         let authorization = authorization(xsts, Utc::now())?;
-        account_unchanged(tokens, &account, &principal)?;
-        Ok(Self { client, signer, authorization, account, principal })
+        tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
+        Ok(Self { client, signer, authorization, account, snapshot })
     }
 
     async fn allowed(&mut self, peer: &str) -> Result<(), &'static str> {
@@ -179,10 +179,10 @@ fn receipt(value: &Value) -> Result<Value, &'static str> {
 pub(super) async fn send(tokens: &TokenManager, expected: &str, peer: &str, message: &str) -> Result<Value, &'static str> {
     let mut session = Session::new(tokens, expected).await?;
     session.allowed(peer).await?;
-    account_unchanged(tokens, &session.account, &session.principal)?;
+    tokens.validate_user_token_snapshot(&session.snapshot).map_err(|_|"account-changed")?;
     let request = super::send_builder(&session.client, peer, message);
     let value = session.post(request).await?;
-    account_unchanged(tokens, &session.account, &session.principal)?;
+    tokens.validate_user_token_snapshot(&session.snapshot).map_err(|_|"account-changed")?;
     Ok(json!({"schema":1,"kind":"sent","account":session.account,"items":[receipt(&value)?]}))
 }
 
@@ -358,7 +358,7 @@ mod tests {
                 bytes
             });
             let client = Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(2)).build().unwrap();
-            let mut session = Session { client, signer:policy("127.0.0.1", "http"), authorization:"SYNTHETIC_NOT_A_TOKEN".into(), account:"synthetic".into(), principal:"synthetic".into() };
+            let mut session = Session { client, signer:policy("127.0.0.1", "http"), authorization:"SYNTHETIC_NOT_A_TOKEN".into(), account:"synthetic".into(), snapshot: {let m=TokenManager::with_memory();m.save_user_session(xodus::models::secrets::User{username:"synthetic".into(),puid:"synthetic".into()},std::collections::HashMap::from([(xodus::tokens::PASSPORT_STS.into(),Token::Compact("synthetic".into()))])).unwrap();m.user_token_snapshot().unwrap()} };
             let body = json!({"parts":[{"contentType":"text","version":0,"text":"synthetic-only"}]});
             let request = session.client.post(format!("http://{address}/fixture")).header("x-xbl-contract-version", "1").json(&body);
             let result = session.post(request).await;

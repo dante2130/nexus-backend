@@ -1,6 +1,9 @@
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
+#[path = "peer.rs"]
+mod peer;
+
 use crate::simple_context::SimpleContext;
 
 pub async fn route(
@@ -27,6 +30,7 @@ async fn route_with_budget(
     let cred = socket.peer_cred().ok().and_then(|cred| cred.pid());
     tracing::debug!("Connection from pid {cred:?}");
 
+    let peer = peer::PeerMonitor::new(&socket);
     loop {
         // One budget includes framing, upstream work, body parsing and reply.
         // Cancellation drops the in-flight async I/O rather than waiting for
@@ -43,10 +47,9 @@ async fn route_with_budget(
                 )),
             }
         };
-        let result = tokio::select! {
-            biased;
-            _ = token.cancelled() => return,
-            result = tokio::time::timeout(budget, request) => result,
+        let result = match peer::run_request(&peer, &token, budget, request).await {
+            peer::RequestEnd::Stopped => return,
+            peer::RequestEnd::Finished(result) => result,
         };
         match result {
             Ok(Ok(())) => {}
