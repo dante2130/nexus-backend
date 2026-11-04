@@ -18,17 +18,35 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Select check mode
+        id: mode
+        run: node scripts/ci/source-check-plan.mjs --detect-mode >> "$GITHUB_OUTPUT"
       - name: Read pinned Rust version
+        if: steps.mode.outputs.mode == 'full'
         run: echo "BACKEND_RUST=$(node -p 'require("./build-config.json").rust')" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.mode.outputs.mode == 'full'
         with:
           toolchain: ${{ env.BACKEND_RUST }}
       - name: Install native test libraries
+        if: steps.mode.outputs.mode == 'full'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev protobuf-compiler libdbus-1-dev dbus-daemon libglib2.0-0 tar xz-utils
       - uses: Swatinem/rust-cache@v2
+        if: steps.mode.outputs.mode == 'full'
       - name: Check source and release contracts
-        run: node --test scripts/ci/*.test.mjs
+        env:
+          SOURCE_CHECK_MODE: ${{ steps.mode.outputs.mode }}
+        run: node scripts/ci/source-check-plan.mjs --run-contracts "$SOURCE_CHECK_MODE"
+      - name: Record skipped native coverage
+        if: steps.mode.outputs.mode == 'source-only'
+        run: |
+          {
+            echo 'Explicit [source-only] mode skipped the Rust toolchain, native test libraries, Rust cache and account-free cargo regression tests.'
+            echo 'This run validated noncompiling source and release contracts only. Native regression coverage did not run and must not be reported as passed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo '::warning title=Native regression skipped::Explicit [source-only] mode skipped the Rust toolchain, native libraries, Rust cache and cargo regression tests.'
       - name: Run account-free native regression tests
+        if: steps.mode.outputs.mode == 'full'
         run: node scripts/test-backend.mjs
