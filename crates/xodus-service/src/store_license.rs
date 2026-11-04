@@ -56,8 +56,9 @@ pub async fn handle(context: &SimpleContext, body: &[u8]) -> StoreLicenseTokenRe
 
 async fn issue(context: &SimpleContext, request: StoreLicenseTokenRequest) -> Result<String, u32> {
     let device = context.device_token.as_ref().ok_or(DENIED)?.clone();
-    let Token::Legacy(user_sts) = context.tokens().get_user_sts_token().map_err(|_| DENIED)? else { return Err(DENIED) };
-    let account = context.tokens().get_user().map_err(|_| DENIED)?;
+    let snapshot=context.tokens().user_token_snapshot_role(xodus::tokens::AccountRole::License).map_err(|_|DENIED)?;
+    let Token::Legacy(user_sts)=snapshot.token() else{return Err(DENIED)};
+    let account=snapshot.user().ok_or(DENIED)?.clone();
     // Same genuine MSA audience/client used by upstream's content licensing.
     let client_id = "{d6d5a677-0872-4ab0-9442-bb792fce85c5}";
     let device_response = xodus::api::live::exchange_device_token(&context.client, device.clone(),
@@ -78,6 +79,7 @@ async fn issue(context: &SimpleContext, request: StoreLicenseTokenRequest) -> Re
     if !user_ticket_type(&response.token_type) { return Err(FAIL) }
     let Token::Compact(user_token) = Token::try_from(response).map_err(|_| FAIL)? else { return Err(FAIL) };
     let user_token = xodus::models::secrets::licensing_ticket(user_token);
+    context.tokens().validate_user_token_snapshot(&snapshot).map_err(|_|DENIED)?;
     let mut response = context.client.post("https://licensing.mp.microsoft.com/v8.0/licenseToken")
         .timeout(Duration::from_secs(60)).header("from", "XboxLicenseManager")
         .header("Authorization", device_token).header("User-Agent", "XboxGameRuntime")
@@ -95,6 +97,7 @@ async fn issue(context: &SimpleContext, request: StoreLicenseTokenRequest) -> Re
     }
     let response: LicenseTokenResponse = serde_json::from_slice(&body).map_err(|_| FAIL)?;
     if response.license_token.is_empty() || response.license_token.len() > 48000 { return Err(FAIL) }
+    context.tokens().validate_user_token_snapshot(&snapshot).map_err(|_|DENIED)?;
     Ok(response.license_token)
 }
 

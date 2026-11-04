@@ -49,9 +49,10 @@ pub async fn run(
         );
         return ExitCode::FAILURE;
     }
+    let snapshot=match tokens.user_token_snapshot_role(xodus::tokens::AccountRole::License){Ok(s)=>s,Err(_)=>return ExitCode::FAILURE};
     // Device-bound Xbox sign-in: device token + title token + user token -> XSTS.
     let (_authenticator, sisu, device) =
-        match xodus::auth::do_sisu(client, tokens, CLIENT_ID, TITLE_ID).await {
+        match xodus::auth::do_sisu_role(client, tokens, CLIENT_ID, TITLE_ID, xodus::tokens::AccountRole::License).await {
             Ok(result) => result,
             Err(_) => {
                 diagnostic("device-sign-in", 0);
@@ -84,6 +85,7 @@ pub async fn run(
             .post(format!("{ENDPOINT}/{value}"))
             .header("Content-Length", "0"),
     };
+    if tokens.validate_user_token_snapshot(&snapshot).is_err(){diagnostic("account-changed",0);return ExitCode::FAILURE;}
     let response = request
         .header("Authorization", xsts.authorization_header_value())
         .header("Accept", "application/json")
@@ -124,6 +126,7 @@ pub async fn run(
         eprintln!("Microsoft returned an unrecognized offline-permission response.");
         return ExitCode::FAILURE;
     };
+    if tokens.validate_user_token_snapshot(&snapshot).is_err(){diagnostic("account-changed",0);return ExitCode::FAILURE;}
     diagnostic("ok", status);
     println!("{summary}");
     if let Some(root) = license_cache

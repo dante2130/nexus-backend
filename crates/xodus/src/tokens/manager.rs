@@ -10,6 +10,9 @@ use crate::tokens::store::{ExpiringTokenBackend, TokenBackend, TokenStoreError};
 #[path = "user_snapshot.rs"]
 mod user_snapshot;
 pub use user_snapshot::UserTokenSnapshot;
+#[path = "accounts.rs"]
+mod accounts;
+pub use accounts::{AccountRole,AccountIdentitySnapshot};
 
 mod keys {
     pub const DEV_LICENSE: &str = "dev_license";
@@ -17,10 +20,9 @@ mod keys {
     pub const USER_TOKENS: &str = "user-tokens";
     pub const USER_INFO: &str = "user-DA";
     pub const USER_SESSION: &str = "user-session";
-    pub const USER_GENERATION: &str = "user-token-generation";
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct UserSession {
     user: User,
     tokens: HashMap<String, Token>,
@@ -104,14 +106,7 @@ impl TokenManager {
     }
 
     pub fn remove_persistent(&self) -> Result<(), TokenStoreError> {
-        let _update = self.persistent_update()?;
-        self.invalidate_legacy_requests()?;
-        self.persistent.remove(keys::DEVICE_TOKENS)?;
-        self.persistent.remove(keys::USER_TOKENS)?;
-        self.persistent.remove(keys::USER_INFO)?;
-        // Clear legacy entries first so a failed logout never exposes a stale
-        // account underneath a still-valid session.
-        self.persistent.remove(keys::USER_SESSION)
+        self.revoke_active_and_device(false)
     }
 
     // ---- Device identity / license -----------------------------------------
@@ -157,24 +152,11 @@ impl TokenManager {
     // ---- User STS tokens (keyed by SOAP "applies_to" address) --------------
 
     pub fn get_user_token_for(&self, address: &str) -> Result<Option<Token>, TokenStoreError> {
-        if let Some(session) = self.user_session()? {
-            return Ok(session.tokens.get(address).cloned());
-        }
-        Self::read_token_store(&*self.persistent, keys::USER_TOKENS, address)
+        self.role_token_for(AccountRole::Xbox,address)
     }
 
     pub fn save_user_token(&self, address: String, token: Token) -> Result<(), TokenStoreError> {
-        let _update = self.persistent_update()?;
-        if let Some(mut session) = self.user_session()? {
-            session.tokens.insert(address, token);
-            return Self::write_verified(
-                &*self.persistent,
-                keys::USER_SESSION,
-                &serde_json::to_vec(&session)?,
-            );
-        }
-        self.invalidate_legacy_requests()?;
-        Self::write_token_store(&*self.persistent, keys::USER_TOKENS, address, token)
+        self.save_role_token(AccountRole::Xbox,address,token)
     }
 
     pub fn get_user_sts_token(&self) -> Result<Token, TokenStoreError> {
@@ -187,30 +169,19 @@ impl TokenManager {
     /// An atomic authenticated user/token pair from the single session record.
     /// Legacy independent entries are not sufficient for identity projection.
     pub fn get_user_sts_session(&self) -> Result<Option<(User, Token)>, TokenStoreError> {
-        let Some(mut session) = self.user_session()? else { return Ok(None) };
-        let token = session.tokens.remove(PASSPORT_STS).ok_or(TokenStoreError::NotFound)?;
-        Ok(Some((session.user, token)))
+        self.role_session(AccountRole::Xbox)
     }
 
     pub fn get_user(&self) -> Result<User, TokenStoreError> {
-        if let Some(session) = self.user_session()? {
-            return Ok(session.user);
-        }
-        let bytes = self
-            .persistent
-            .get(keys::USER_INFO)?
-            .ok_or(TokenStoreError::NotFound)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        self.role_user(AccountRole::Xbox)
     }
 
     pub fn save_user(&self, user: &User) -> Result<(), TokenStoreError> {
-        let _update = self.persistent_update()?;
-        self.invalidate_legacy_requests()?;
-        Self::write_verified(
-            &*self.persistent,
-            keys::USER_INFO,
-            &serde_json::to_vec(user)?,
-        )
+        let _guard=self.persistent_update()?;let mut s=self.accounts_unlocked()?;
+        let slot=&mut s.store;
+        let c=slot.credentials.get_or_insert_with(||accounts::Credentials{user:None,tokens:HashMap::new(),authenticated:false});
+        if c.authenticated {return Err(TokenStoreError::SessionChanged);}
+        c.user=Some(user.clone());slot.epoch=uuid::Uuid::new_v4().to_string();self.write_accounts_unlocked(&s)
     }
 
     fn user_session(&self) -> Result<Option<UserSession>, TokenStoreError> {
@@ -228,16 +199,7 @@ impl TokenManager {
         user: User,
         tokens: HashMap<String, Token>,
     ) -> Result<(), TokenStoreError> {
-        let _update = self.persistent_update()?;
-        if tokens.is_empty() || user.username.trim().is_empty() || user.puid.is_empty() {
-            return Err(TokenStoreError::NotFound);
-        }
-        let session = UserSession { user, tokens, generation: Some(uuid::Uuid::new_v4().to_string()) };
-        Self::write_verified(
-            &*self.persistent,
-            keys::USER_SESSION,
-            &serde_json::to_vec(&session)?,
-        )
+        self.save_role_session(AccountRole::License,user,tokens)
     }
 
     // ---- Ephemeral XSTS-by-relying-party cache --------------------------------

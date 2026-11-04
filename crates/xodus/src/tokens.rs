@@ -6,7 +6,7 @@ pub mod session;
 #[cfg(unix)]
 mod transaction;
 
-pub use manager::{PASSPORT_STS, TokenManager};
+pub use manager::{PASSPORT_STS, TokenManager, AccountRole, AccountIdentitySnapshot, UserTokenSnapshot};
 
 #[cfg(test)]
 mod credential_tests;

@@ -137,7 +137,7 @@ pub struct TokenStore {
     pub tokens: std::collections::HashMap<String, Token>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub puid: String,
     pub username: String,

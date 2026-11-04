@@ -66,6 +66,7 @@ fn history_request(client: &reqwest::Client, authorization: &str, xuid: &str, ti
 }
 
 async fn lookup(tokens: &TokenManager, title_id: u32) -> Result<Value, &'static str> {
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     let (client, authorization, account) = xbox_session(tokens).await?;
     let response = client.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag")
         .header("Authorization", &authorization).header("x-xbl-contract-version", "2")
@@ -94,7 +95,7 @@ async fn lookup(tokens: &TokenManager, title_id: u32) -> Result<Value, &'static 
     if !played_ok && !history_ok { return Err("activity-unavailable"); }
     let played = played.ok().flatten();
     let history = history.ok().flatten();
-    if tokens.get_user().map_err(|_| "account-changed")?.username != account { return Err("account-changed"); }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     Ok(json!({"schema":1,"account":account,"titleId":title_id.to_string(),
         "minutesPlayed":played,"lastPlayed":history,"partial":!played_ok || !history_ok}))
 }

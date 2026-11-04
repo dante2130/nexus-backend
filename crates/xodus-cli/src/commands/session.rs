@@ -13,28 +13,65 @@ pub fn diagnostic(stage: &'static str) {
     eprintln!("NEXUS_SESSION_DIAGNOSTIC_V1 {stage}");
 }
 
+/// Which stored account a session is prepared for. `Xbox` is the player
+/// (Xbox Live profile, social, saves). `License` owns the games or the
+/// subscription (Store ticket, library, membership). Without a separate player
+/// account both are the same account.
+#[derive(Clone, Copy)]
+pub enum Role {
+    License,
+    Xbox,
+}
+
+impl Role {
+    fn account_role(self)->xodus::tokens::AccountRole {match self {Self::License=>xodus::tokens::AccountRole::License,Self::Xbox=>xodus::tokens::AccountRole::Xbox}}
+}
+
 pub async fn prepare(
     tokens: &TokenManager,
     client: &reqwest::Client,
-) -> Result<(String, LegacyToken, LegacyToken), &'static str> {
-    prepare_with(tokens, || async {
+) -> Result<(String, LegacyToken, LegacyToken, xodus::tokens::UserTokenSnapshot), &'static str> {
+    prepare_for(Role::Xbox, tokens, || async {
         xodus::tokens::device::refresh_existing_device_credentials(client, tokens).await
     })
     .await
 }
 
+/// Same as `prepare`, for the account that owns the games or subscription.
+pub async fn prepare_license(
+    tokens: &TokenManager,
+    client: &reqwest::Client,
+) -> Result<(String, LegacyToken, LegacyToken, xodus::tokens::UserTokenSnapshot), &'static str> {
+    prepare_for(Role::License, tokens, || async {
+        xodus::tokens::device::refresh_existing_device_credentials(client, tokens).await
+    })
+    .await
+}
+
+#[cfg(test)]
 async fn prepare_with<F, Fut>(
     tokens: &TokenManager,
-    mut refresh: F,
-) -> Result<(String, LegacyToken, LegacyToken), &'static str>
+    refresh: F,
+) -> Result<(String, LegacyToken, LegacyToken, xodus::tokens::UserTokenSnapshot), &'static str>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(), xodus::tokens::store::TokenStoreError>>,
 {
-    let account = tokens.get_user().map_err(|_| "stored-account")?.username;
-    let user = tokens
-        .get_user_sts_token()
-        .map_err(|_| "session-user-unavailable")?;
+    prepare_for(Role::Xbox, tokens, refresh).await
+}
+
+async fn prepare_for<F, Fut>(
+    role: Role,
+    tokens: &TokenManager,
+    mut refresh: F,
+) -> Result<(String, LegacyToken, LegacyToken, xodus::tokens::UserTokenSnapshot), &'static str>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), xodus::tokens::store::TokenStoreError>>,
+{
+    let snapshot=tokens.user_token_snapshot_role(role.account_role()).map_err(|_|"stored-account")?;
+    let account=snapshot.stored_user().ok_or("stored-account")?.username.clone();
+    let user=snapshot.token();
     match session::state(&user, chrono::Utc::now()) {
         State::Expired => return Err("session-user-expired"),
         State::Invalid => return Err("session-user-invalid"),
@@ -60,14 +97,7 @@ where
             .await
             .map_err(|_| "session-device-refresh-failed")?;
     }
-    if tokens
-        .get_user()
-        .map_err(|_| "session-account-changed")?
-        .username
-        != account
-    {
-        return Err("session-account-changed");
-    }
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"session-account-changed")?;
     let device = tokens
         .get_device_sts_token()
         .map_err(|_| "session-device-unavailable")?;
@@ -80,7 +110,7 @@ where
     let Token::Legacy(user) = user else {
         return Err("session-user-invalid");
     };
-    Ok((account, device, user))
+    Ok((account, device, user, snapshot))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +300,25 @@ mod tests {
                 .unwrap();
         }
         tokens
+    }
+    #[tokio::test]
+    async fn credential_session_same_name_saved_activation_and_player_aba_are_rejected(){
+        use xodus::tokens::AccountRole;
+        for player in [false,true]{
+            let tokens=manager(expired(),current(),true);
+            let u=User{puid:"same".into(),username:"same@example.test".into()};
+            tokens.save_user_session(u.clone(),std::collections::HashMap::from([(PASSPORT_STS.into(),current())])).unwrap();
+            tokens.enable_saved_accounts().unwrap();
+            if player{tokens.save_player_session(u,std::collections::HashMap::from([(PASSPORT_STS.into(),current())])).unwrap();}
+            let result=prepare_for(if player{Role::Xbox}else{Role::License},&tokens,||{
+                tokens.save_device_token(PASSPORT_STS.into(),current()).unwrap();
+                if player{tokens.remove_player().unwrap();tokens.save_player_session(User{puid:"same".into(),username:"same@example.test".into()},std::collections::HashMap::from([(PASSPORT_STS.into(),current())])).unwrap();}
+                else{tokens.activate_saved_account("same@example.test").unwrap();}
+                ready(Ok(()))
+            }).await;
+            assert_eq!(result.err(),Some("session-account-changed"));
+            assert_eq!(tokens.user_token_snapshot_role(if player{AccountRole::Xbox}else{AccountRole::License}).unwrap().stored_user().unwrap().username,"same@example.test");
+        }
     }
     #[tokio::test]
     async fn credential_session_valid_signin_has_no_renewal_and_raw_reads_are_unchanged() {

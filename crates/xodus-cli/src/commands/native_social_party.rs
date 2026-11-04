@@ -64,6 +64,7 @@ fn default_region(value:&Value)->Result<String,&'static str>{
         .map(str::to_owned).ok_or("party-region-name")
 }
 async fn relay_region(tokens:&TokenManager,expected_account:&str)->Result<String,&'static str>{
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     // The shipped party client uses the authenticated streaming service's default region.
     let(client,authorization,account,_)=super::profile::xbox_session_for(tokens,"http://gssv.xboxlive.com/").await?;
     if account!=expected_account{return Err("account-changed");}
@@ -72,9 +73,11 @@ async fn relay_region(tokens:&TokenManager,expected_account:&str)->Result<String
     if response.status().as_u16()==401{super::profile::invalidate_social_session(tokens);}
     if !response.status().is_success(){return Err("party-region-http");}
     let bytes=bounded(response,1024*1024).await?;
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     default_region(&serde_json::from_slice(&bytes).map_err(|_|"party-region-json")?)
 }
 pub(super) async fn request(tokens:&TokenManager,body:&str)->Result<Value,&'static str>{
+    let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     if body.len()>160*1024{return Err("party-input-size");}
     let input:Value=serde_json::from_str(body).map_err(|_|"party-input-json")?;
     let operation=validate(&input)?;
@@ -155,7 +158,7 @@ pub(super) async fn request(tokens:&TokenManager,body:&str)->Result<Value,&'stat
             _=>document(&value,&self_xuid)?,
         }
     };
-    if tokens.get_user().map_err(|_|"account-changed")?.username!=account{return Err("account-changed");}
+    tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
     Ok(json!({"schema":1,"kind":"party","account":account,"operation":operation,"result":result}))
 }
 

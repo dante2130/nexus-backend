@@ -1,157 +1,172 @@
+use super::accounts::Credentials;
 use super::*;
 
 // Intentionally no Debug implementation: snapshots contain credentials.
 pub struct UserTokenSnapshot {
-    source: Source,
+    requested: AccountRole,
+    selected: AccountRole,
+    epoch: String,
+    fallback_epoch: Option<String>,
+    credentials: Credentials,
     token: Token,
-}
-enum Source {
-    Session(UserSession),
-    Legacy {
-        tokens: Vec<u8>,
-        user: Option<Vec<u8>>,
-        generation: Option<Vec<u8>>,
-    },
 }
 impl UserTokenSnapshot {
     pub fn token(&self) -> Token {
         self.token.clone()
     }
+    /// Only an authenticated atomic session can project account metadata.
     pub fn user(&self) -> Option<&User> {
-        match &self.source {
-            Source::Session(session) => Some(&session.user),
-            _ => None,
+        if self.credentials.authenticated {
+            self.credentials.user.as_ref()
+        } else {
+            None
         }
     }
-}
-
-impl TokenManager {
-    pub(super) fn invalidate_legacy_requests(&self) -> Result<(), TokenStoreError> {
-        // A non-secret tombstone survives logout so identical legacy credentials
-        // from a later login cannot make an old request current again.
-        Self::write_verified(
-            &*self.persistent,
-            keys::USER_GENERATION,
-            uuid::Uuid::new_v4().as_bytes(),
+    /// A legacy display name is not authenticated account metadata.
+    pub fn stored_user(&self) -> Option<&User> {
+        self.credentials.user.as_ref()
+    }
+    pub fn role(&self) -> AccountRole {
+        self.requested
+    }
+    pub fn cache_binding(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            if self.requested == AccountRole::License {
+                "license"
+            } else {
+                "xbox"
+            },
+            self.epoch,
+            self.fallback_epoch.as_deref().unwrap_or("")
         )
     }
-
+}
+impl TokenManager {
     pub fn user_token_snapshot(&self) -> Result<UserTokenSnapshot, TokenStoreError> {
-        let _guard = self.persistent_update()?;
-        self.user_snapshot_unlocked()
+        self.user_token_snapshot_role(AccountRole::Xbox)
     }
-
-    fn user_snapshot_unlocked(&self) -> Result<UserTokenSnapshot, TokenStoreError> {
-        if let Some(mut session) = self.user_session()? {
-            let token = session
-                .tokens
-                .get(PASSPORT_STS)
-                .cloned()
-                .ok_or(TokenStoreError::NotFound)?;
-            if session.generation.is_none() {
-                session.generation = Some(uuid::Uuid::new_v4().to_string());
-                Self::write_verified(
-                    &*self.persistent,
-                    keys::USER_SESSION,
-                    &serde_json::to_vec(&session)?,
-                )?;
-            }
-            return Ok(UserTokenSnapshot {
-                source: Source::Session(session),
-                token,
-            });
-        }
-        let tokens = self
-            .persistent
-            .get(keys::USER_TOKENS)?
-            .ok_or(TokenStoreError::NotFound)?;
-        let parsed: TokenStore = serde_json::from_slice(&tokens)?;
-        let token = parsed
+    pub fn user_token_snapshot_role(
+        &self,
+        role: AccountRole,
+    ) -> Result<UserTokenSnapshot, TokenStoreError> {
+        let _guard = self.persistent_update()?;
+        let state = self.accounts_unlocked()?;
+        Self::snapshot_unlocked(&state, role)
+    }
+    pub fn runtime_identity_snapshots(
+        &self,
+    ) -> Result<(UserTokenSnapshot, Option<UserTokenSnapshot>), TokenStoreError> {
+        let _guard = self.persistent_update()?;
+        let state = self.accounts_unlocked()?;
+        let xbox = Self::snapshot_unlocked(&state, AccountRole::Xbox)?;
+        let store = if state.store.credentials.as_ref().is_some_and(|c|c.authenticated && c.tokens.contains_key(PASSPORT_STS)) {
+            Some(Self::snapshot_unlocked(&state, AccountRole::License)?)
+        } else {
+            None
+        };
+        Ok((xbox, store))
+    }
+    fn snapshot_unlocked(
+        state: &accounts::Accounts,
+        role: AccountRole,
+    ) -> Result<UserTokenSnapshot, TokenStoreError> {
+        let (selected, slot) = state.selected(role);
+        let c = slot.credentials.as_ref().ok_or(TokenStoreError::NotFound)?;
+        let token = c
             .tokens
             .get(PASSPORT_STS)
             .cloned()
             .ok_or(TokenStoreError::NotFound)?;
         Ok(UserTokenSnapshot {
-            token,
-            source: Source::Legacy {
-                tokens,
-                user: self.persistent.get(keys::USER_INFO)?,
-                generation: self.persistent.get(keys::USER_GENERATION)?,
+            requested: role,
+            selected,
+            epoch: slot.epoch.clone(),
+            fallback_epoch: if role == AccountRole::Xbox && selected == AccountRole::License {
+                Some(state.player.epoch.clone())
+            } else {
+                None
             },
+            credentials: c.clone(),
+            token,
         })
     }
-
-    fn current_snapshot_session(
-        &self,
+    fn current_snapshot<'a>(
+        state: &'a accounts::Accounts,
         snapshot: &UserTokenSnapshot,
-    ) -> Result<Option<UserSession>, TokenStoreError> {
-        let current = self.user_session()?;
-        match (&snapshot.source, &current) {
-            (Source::Session(before), Some(after))
-                if before.generation == after.generation
-                    && before.user.puid == after.user.puid
-                    && before.user.username == after.user.username =>
-            {
-                Ok(current)
-            }
-            (
-                Source::Legacy {
-                    tokens,
-                    user,
-                    generation,
-                },
-                None,
-            ) if self.persistent.get(keys::USER_TOKENS)?.as_ref() == Some(tokens)
-                && self.persistent.get(keys::USER_INFO)? == *user
-                && self.persistent.get(keys::USER_GENERATION)? == *generation =>
-            {
-                Ok(None)
-            }
-            _ => Err(TokenStoreError::SessionChanged),
+    ) -> Result<&'a accounts::Credentials, TokenStoreError> {
+        let (selected, slot) = state.selected(snapshot.requested);
+        if selected != snapshot.selected
+            || slot.epoch != snapshot.epoch
+            || snapshot
+                .fallback_epoch
+                .as_ref()
+                .is_some_and(|g| g != &state.player.epoch)
+        {
+            return Err(TokenStoreError::SessionChanged);
         }
+        let c = slot
+            .credentials
+            .as_ref()
+            .ok_or(TokenStoreError::SessionChanged)?;
+        if c.user.as_ref().map(|u| (&u.puid, &u.username))
+            != snapshot
+                .credentials
+                .user
+                .as_ref()
+                .map(|u| (&u.puid, &u.username))
+        {
+            return Err(TokenStoreError::SessionChanged);
+        }
+        Ok(c)
     }
-
     pub fn validate_user_token_snapshot(
         &self,
         snapshot: &UserTokenSnapshot,
     ) -> Result<(), TokenStoreError> {
         let _guard = self.persistent_update()?;
-        self.current_snapshot_session(snapshot)?;
+        let state = self.accounts_unlocked()?;
+        Self::current_snapshot(&state, snapshot)?;
         Ok(())
     }
-
-    /// Reject another login/logout; do not replace a newer refresh credential
-    /// from a concurrent request within the same session. No network under lock.
+    /// Refresh only the captured role/session. A newer same-session refresh is
+    /// retained; active Store and its saved copy change in one verified value.
     pub fn accept_user_token_refresh(
         &self,
         snapshot: &mut UserTokenSnapshot,
         refreshed: Option<(String, Token)>,
     ) -> Result<(), TokenStoreError> {
         let _guard = self.persistent_update()?;
-        let current = self.current_snapshot_session(snapshot)?;
+        let mut state = self.accounts_unlocked()?;
+        let current = Self::current_snapshot(&state, snapshot)?;
         if let Some((address, token)) = refreshed {
-            if let Some(mut session) = current {
-                let Source::Session(before) = &snapshot.source else {
-                    unreachable!()
-                };
-                if serde_json::to_vec(&session.tokens.get(PASSPORT_STS))?
-                    == serde_json::to_vec(&before.tokens.get(PASSPORT_STS))?
-                    && serde_json::to_vec(&session.tokens.get(&address))?
-                        == serde_json::to_vec(&before.tokens.get(&address))?
-                {
-                    session.tokens.insert(address, token);
-                    Self::write_verified(
-                        &*self.persistent,
-                        keys::USER_SESSION,
-                        &serde_json::to_vec(&session)?,
-                    )?;
+            if serde_json::to_vec(&current.tokens.get(PASSPORT_STS))?
+                == serde_json::to_vec(&snapshot.credentials.tokens.get(PASSPORT_STS))?
+                && serde_json::to_vec(&current.tokens.get(&address))?
+                    == serde_json::to_vec(&snapshot.credentials.tokens.get(&address))?
+            {
+                let slot = state.slot_mut(snapshot.selected);
+                let c = slot
+                    .credentials
+                    .as_mut()
+                    .ok_or(TokenStoreError::SessionChanged)?;
+                c.tokens.insert(address, token);
+                if !c.authenticated {
+                    slot.epoch = uuid::Uuid::new_v4().to_string();
                 }
-            } else {
-                self.invalidate_legacy_requests()?;
-                Self::write_token_store(&*self.persistent, keys::USER_TOKENS, address, token)?;
+                if snapshot.selected == AccountRole::License
+                    && state
+                        .store
+                        .credentials
+                        .as_ref()
+                        .is_some_and(|c| c.authenticated)
+                {
+                    state.remember(state.store.credentials.clone().unwrap())?;
+                }
+                self.write_accounts_unlocked(&state)?;
             }
         }
-        *snapshot = self.user_snapshot_unlocked()?;
+        *snapshot = Self::snapshot_unlocked(&state, snapshot.requested)?;
         Ok(())
     }
 }

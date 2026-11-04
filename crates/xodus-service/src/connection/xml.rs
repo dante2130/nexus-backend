@@ -54,7 +54,7 @@ pub async fn parse_message(
             let string_buf = std::str::from_utf8(&buffer)?;
             tracing::debug!("String buffer: {string_buf:?}");
             let req = quick_xml::de::from_str::<MSATokenRequest>(string_buf)?;
-            let mut identity_session = context.tokens().user_token_snapshot()?;
+            let (mut identity_session, store_session) = context.tokens().runtime_identity_snapshots()?;
             let request_token = identity_session.token();
             let Token::Legacy(token) = request_token else {
                 return Ok(vec![]);
@@ -111,10 +111,11 @@ pub async fn parse_message(
             // Store licensing uses this same session facade. Bind the
             // Xbox ticket's MSA principal to its current Store account,
             // never infer either account identifier from an Xbox XUID.
-            let current_identity = context.tokens().get_user_sts_session().ok().flatten();
+            context.tokens().validate_user_token_snapshot(&identity_session)?;
+            if let Some(store)=&store_session {context.tokens().validate_user_token_snapshot(store)?;}
             let (xbox_msa_account_id, store_msa_account_id) = crate::account_metadata::bound_ids(
                 identity_session.user(),
-                current_identity.as_ref().map(|(user, _)| user),
+                store_session.as_ref().and_then(|session|session.user()),
             );
             let payload = MSATokenResponse {
                 token: user_token,

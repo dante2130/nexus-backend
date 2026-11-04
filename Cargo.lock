@@ -7211,6 +7211,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "console-subscriber",
+ "nix",
  "quick-xml 0.42.0",
  "reqwest 0.13.4",
  "serde",

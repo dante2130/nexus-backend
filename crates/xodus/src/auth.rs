@@ -125,7 +125,24 @@ pub async fn do_sisu(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut snapshot = manager.user_token_snapshot()?;
+    do_sisu_role(client,manager,client_id,title_id,crate::tokens::AccountRole::Xbox).await
+}
+
+pub async fn do_sisu_role(
+    client: &Client,
+    manager: &TokenManager,
+    client_id: &str,
+    title_id: i64,
+    role:crate::tokens::AccountRole,
+) -> Result<
+    (
+        XalAuthenticator,
+        xal::response::SisuRPSAuthorizationResponse,
+        xal::response::DeviceToken,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut snapshot = manager.user_token_snapshot_role(role)?;
     let Token::Legacy(token) = snapshot.token() else {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
