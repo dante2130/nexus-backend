@@ -2,16 +2,19 @@ use crate::models::xbox::{
     UserAuthProperties, UserAuthRequest, XstsPropertyBag, XstsRequest, XstsResponse,
 };
 
+#[path = "auth_diagnostics.rs"]
+mod diagnostics;
+
 pub async fn authenticate_xbox_user(
     client: &reqwest::Client,
     rps_ticket: String,
 ) -> reqwest::Result<XstsResponse> {
     let resp = xbox_user_request(client, rps_ticket)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|error| diagnostics::request(diagnostics::Stage::User, error))?;
 
-    resp.json().await
+    diagnostics::response(diagnostics::Stage::User, resp).await
 }
 
 fn xbox_user_request(client: &reqwest::Client, rps_ticket: String) -> reqwest::RequestBuilder {
@@ -88,10 +91,10 @@ pub async fn request_xsts_token(
         .header("x-xbl-contract-version", "1")
         .json(&body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|error| diagnostics::request(diagnostics::Stage::Xsts, error))?;
 
-    resp.json().await
+    diagnostics::response(diagnostics::Stage::Xsts, resp).await
 }
 
 pub fn get_xsts_auth_header(
