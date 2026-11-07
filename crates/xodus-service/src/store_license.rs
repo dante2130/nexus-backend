@@ -29,6 +29,41 @@ fn valid(req: &StoreLicenseTokenRequest) -> bool {
         && !req.custom_developer_string.is_empty() && req.custom_developer_string.len() <= 4096
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceTicketKind {
+    Compact,
+    DelegationCompact,
+}
+
+fn device_ticket_kind(token_type: &str) -> Option<DeviceTicketKind> {
+    match token_type {
+        "urn:passport:compact" => Some(DeviceTicketKind::Compact),
+        "urn:passport:delegationcompact" => Some(DeviceTicketKind::DelegationCompact),
+        _ => None,
+    }
+}
+
+// Device authorization accepts exactly the two compact token types that
+// Token::try_from already parses. The plain compact value is used unchanged as
+// before. Delegation compact tickets carry the d=/t= wire form that content
+// licensing normalizes with licensing_ticket, so only that form is normalized
+// here. No granting, no legacy tokens, no decryption, no payload rewriting.
+fn device_license_ticket(response: soap::RequestSecurityTokenResponse) -> Result<String, u32> {
+    let kind = match device_ticket_kind(&response.token_type) {
+        Some(kind) => kind,
+        None => return Err(FAIL),
+    };
+    let empty_payload = response.requested_security_token.binary_security_token.as_ref()
+        .map_or(true, |token| token.value.is_empty());
+    if empty_payload { return Err(FAIL) }
+    let Token::Compact(ticket) = Token::try_from(response).map_err(|_| FAIL)? else { return Err(FAIL) };
+    if ticket.is_empty() { return Err(FAIL) }
+    match kind {
+        DeviceTicketKind::Compact => Ok(ticket),
+        DeviceTicketKind::DelegationCompact => Ok(xodus::models::secrets::licensing_ticket(ticket)),
+    }
+}
+
 fn license_request(request: StoreLicenseTokenRequest, beneficiaries: Vec<LicenseUserIdentity>) -> LicenseTokenRequest {
     LicenseTokenRequest {
         parent_product_id: request.parent_product_id, enforce_sellable_by: true,
@@ -64,8 +99,7 @@ async fn issue(context: &SimpleContext, request: StoreLicenseTokenRequest) -> Re
     let device_response = xodus::api::live::exchange_device_token(&context.client, device.clone(),
         client_id.into(), "www.microsoft.com".into(), Some(soap::PolicyReference::mbi_ssl()))
         .await.map_err(|_| FAIL)?;
-    if device_response.token_type != "urn:passport:compact" { return Err(FAIL) }
-    let Token::Compact(device_token) = Token::try_from(device_response).map_err(|_| FAIL)? else { return Err(FAIL) };
+    let device_token = device_license_ticket(device_response)?;
     let user_response = xodus::api::live::exchange_user_token(&context.client, user_sts,
         account.username, device, None, Some("Silent".into()), client_id.into(),
         &[("www.microsoft.com".into(), Some(soap::PolicyReference::mbi_ssl()))])
@@ -108,6 +142,48 @@ fn user_ticket_type(token_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SYNTHETIC_DEVICE_JWE: &str =
+        "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..aXY.Y2lwaGVy_dGV4dA.dGFn";
+
+    fn device_response(kind: &str, value: Option<&str>) -> soap::RequestSecurityTokenResponse {
+        soap::RequestSecurityTokenResponse {
+            token_type: kind.into(),
+            applies_to: soap::AppliesTo { endpoint_reference: soap::EndpointReference {
+                address: "synthetic.invalid".into() } },
+            lifetime: soap::Timestamp { id: None, created: "2000-01-01T00:00:00Z".into(),
+                expires: "2099-01-01T00:00:00Z".into() },
+            requested_security_token: soap::RequestedSecurityToken { encrypted_data: None,
+                binary_security_token: value.map(|value| soap::BinarySecurityTokenRes {
+                    id: "synthetic".into(), value: value.into(), value_type: None }) },
+            requested_proof_token: None,
+        }
+    }
+
+    #[test]
+    fn device_compact_tickets_are_used_unchanged() {
+        for value in ["opaque-device-ticket", SYNTHETIC_DEVICE_JWE] {
+            assert_eq!(device_license_ticket(device_response("urn:passport:compact", Some(value))), Ok(value.to_string()));
+        }
+    }
+
+    #[test]
+    fn device_delegation_tickets_use_the_licensing_wire_form() {
+        assert_eq!(device_license_ticket(device_response("urn:passport:delegationcompact", Some(SYNTHETIC_DEVICE_JWE))),
+            Ok(SYNTHETIC_DEVICE_JWE.to_string()));
+        assert_eq!(device_license_ticket(device_response("urn:passport:delegationcompact", Some("opaque-device-ticket"))),
+            Ok("t=opaque-device-ticket".to_string()));
+    }
+
+    #[test]
+    fn device_unknown_legacy_missing_and_empty_payloads_fail_closed() {
+        assert_eq!(device_license_ticket(device_response("urn:passport:legacy", Some(SYNTHETIC_DEVICE_JWE))), Err(FAIL));
+        assert_eq!(device_license_ticket(device_response("urn:passport:unknown", Some(SYNTHETIC_DEVICE_JWE))), Err(FAIL));
+        assert_eq!(device_license_ticket(device_response("urn:passport:compact", None)), Err(FAIL));
+        assert_eq!(device_license_ticket(device_response("urn:passport:delegationcompact", None)), Err(FAIL));
+        assert_eq!(device_license_ticket(device_response("urn:passport:compact", Some(""))), Err(FAIL));
+        assert_eq!(device_license_ticket(device_response("urn:passport:delegationcompact", Some(""))), Err(FAIL));
+    }
 
     #[test]
     fn store_license_accepts_delegation_compact_user_tickets() {
