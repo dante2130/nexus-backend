@@ -280,6 +280,28 @@ fn blocked_ids(value:&Value)->Result<Vec<String>,&'static str>{
         if !seen.insert(id){return Err("people-blocked-duplicate");}result.push(id.to_owned());}
     Ok(result)
 }
+const GAME_IMAGE_HOSTS:[&str;5]=["store-images.s-microsoft.com","store-images.microsoft.com","images-eds-ssl.xboxlive.com","images-eds.xboxlive.com","images-assets-ssl.xboxlive.com"];
+/// Normalize title-history artwork for the renderer. Only known Microsoft image
+/// hosts are accepted, and plain HTTP is upgraded to HTTPS. Credentials,
+/// explicit ports, control characters, oversized values and any non-HTTP scheme
+/// are rejected. This is public title metadata; no account or token is involved.
+fn game_image_url(value:&str)->Option<String>{
+    // Reject every raw whitespace and control character before parsing. Do not
+    // decode percent escapes here: a legitimate %20 in a path or query is kept.
+    if value.is_empty()||value.len()>8192||value.chars().any(|c|c.is_whitespace()||c.is_control()){return None;}
+    // Url::parse removes a default port (443/80) and empty userinfo, so inspect
+    // the literal authority too. Reject every explicit port and any userinfo
+    // syntax, including an empty '@' authority.
+    let (_,rest)=value.split_once("://")?;
+    let authority=rest.split(|c|matches!(c,'/'| '?'| '#')).next().unwrap_or(rest);
+    if authority.contains(':')||authority.contains('@'){return None;}
+    let mut url=reqwest::Url::parse(value).ok()?;
+    if !matches!(url.scheme(),"http"|"https"){return None;}
+    if !url.username().is_empty()||url.password().is_some(){return None;}
+    if !GAME_IMAGE_HOSTS.contains(&url.host_str()?){return None;}
+    url.set_scheme("https").ok()?;
+    Some(url.to_string())
+}
 fn people_games(value:&Value)->Result<Value,&'static str>{
     let rows=value["titles"].as_array().filter(|a|a.len()<=2000).ok_or("people-games-shape")?;
     let mut items=Vec::new();let mut seen=HashSet::new();
@@ -291,7 +313,7 @@ fn people_games(value:&Value)->Result<Value,&'static str>{
         if !seen.insert(id.clone()){return Err("people-game-duplicate");}
         let name=text(&row["name"],256).filter(|s|!s.trim().is_empty()).ok_or("people-game-name")?;
         let mut item=json!({"titleId":id,"name":name});
-        if let Some(url)=row["displayImage"].as_str().filter(|s|s.len()<=8192).and_then(|s|reqwest::Url::parse(s).ok()).filter(|u|u.scheme()=="https"&&u.username().is_empty()&&u.password().is_none()&&u.port().is_none()&&matches!(u.host_str(),Some("store-images.s-microsoft.com"|"images-eds-ssl.xboxlive.com"|"images-assets-ssl.xboxlive.com"))){item["imageUrl"]=json!(url.to_string());}
+        if let Some(url)=row["displayImage"].as_str().and_then(game_image_url){item["imageUrl"]=json!(url);}
         if let Some(date)=row["titleHistory"]["lastTimePlayed"].as_str().filter(|s|s.len()<=64).and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok()){item["lastPlayed"]=json!(date.to_rfc3339());}
         for(key,source)in[("currentGamerscore","currentGamerscore"),("totalGamerscore","totalGamerscore"),("achievementsUnlocked","currentAchievements"),("achievementsTotal","totalAchievements")]{
             if let Some(count)=row["achievement"][source].as_u64().filter(|n|*n<=1_000_000_000){item[key]=json!(count);}
@@ -623,6 +645,65 @@ pub async fn run(tokens: &TokenManager, action: Action) -> ExitCode {
         let mut bad=value.clone();bad["titles"][0]["displayImage"]=json!("https://example.test/private");bad["titles"][0]["achievement"]=Value::Null;
         let page=people_games(&bad).unwrap();assert!(page["items"][0].get("imageUrl").is_none());assert!(page["items"][0].get("currentGamerscore").is_none());
         for id in ["4294967296","0","1/../../","123a"]{bad["titles"][0]["titleId"]=json!(id);assert!(people_games(&bad).is_err());}
+    }
+    #[test]fn game_artwork_accepts_only_known_microsoft_hosts_and_upgrades_http(){
+        for (input,expected) in [
+            ("http://store-images.microsoft.com/image/apps","https://store-images.microsoft.com/image/apps"),
+            ("http://store-images.s-microsoft.com/image/apps","https://store-images.s-microsoft.com/image/apps"),
+            ("https://store-images.s-microsoft.com/image/apps","https://store-images.s-microsoft.com/image/apps"),
+            ("https://store-images.microsoft.com/image/apps","https://store-images.microsoft.com/image/apps"),
+            ("http://images-eds.xboxlive.com/image","https://images-eds.xboxlive.com/image"),
+            ("https://images-eds-ssl.xboxlive.com/image","https://images-eds-ssl.xboxlive.com/image"),
+            ("http://images-assets-ssl.xboxlive.com/image","https://images-assets-ssl.xboxlive.com/image"),
+            ("HTTPS://STORE-IMAGES.S-MICROSOFT.COM/image/apps","https://store-images.s-microsoft.com/image/apps"),
+            ("https://store-images.microsoft.com/image/has%20space","https://store-images.microsoft.com/image/has%20space"),
+            ("http://store-images.microsoft.com/image?q=has%20space","https://store-images.microsoft.com/image?q=has%20space"),
+        ] {
+            assert_eq!(game_image_url(input).as_deref(),Some(expected),"input {input}");
+        }
+        for invalid in ["","not a url","//store-images.s-microsoft.com/image","ftp://store-images.s-microsoft.com/image",
+            "file:///tmp/image","https://example.test/image","http://example.test/image",
+            "https://user@store-images.s-microsoft.com/image","https://user:secret@store-images.s-microsoft.com/image",
+            "https://@store-images.s-microsoft.com/image","https://:pass@store-images.s-microsoft.com/image",
+            "https://store-images.s-microsoft.com:443/image","http://store-images.s-microsoft.com:80/image",
+            "https://store-images.s-microsoft.com/image\nprivate"," https://store-images.s-microsoft.com/image",
+            "https://store-images.s-microsoft.com/image ",
+            "https://store-images.s-microsoft.com/image/has space",
+            "https://store-images.s-microsoft.com/image/has\tspace",
+            "https://store-images.s-microsoft.com/image?q=has\nspace",
+            "https://store-images.s-microsoft.com/image/has\u{00A0}space",
+            "https://store-images.s-microsoft.com/image/has\u{3000}space"] {
+            assert!(game_image_url(invalid).is_none(),"accepted {invalid:?}");
+        }
+        assert!(game_image_url(&format!("https://store-images.s-microsoft.com/{}","a".repeat(8192))).is_none());
+    }
+    #[test]fn game_metadata_survives_unsafe_art_and_encoded_space_is_allowed(){
+        let base=json!({"titles":[{"titleId":"7","name":"Legacy","type":"Game","displayImage":"https://store-images.microsoft.com/image/has%20space",
+            "titleHistory":{"lastTimePlayed":"2026-10-23T12:34:56Z"},"achievement":{"currentAchievements":2,"totalAchievements":10,"currentGamerscore":20,"totalGamerscore":100}}]});
+        let page=people_games(&base).unwrap();let row=&page["items"][0];
+        assert_eq!(row["imageUrl"],"https://store-images.microsoft.com/image/has%20space");
+        assert_eq!(row["titleId"],"7");assert_eq!(row["name"],"Legacy");assert_eq!(row["lastPlayed"],"2026-10-23T12:34:56+00:00");
+        assert_eq!(row["achievementsUnlocked"],2);assert_eq!(row["achievementsTotal"],10);assert_eq!(row["currentGamerscore"],20);
+        for bad in ["https://store-images.microsoft.com/image/has space","https://store-images.microsoft.com/image?q=a\tb",
+            "https://@store-images.microsoft.com/image","https://\u{00A0}@store-images.microsoft.com/image"]{
+            let mut copy=base.clone();copy["titles"][0]["displayImage"]=json!(bad);
+            let page=people_games(&copy).unwrap();let row=&page["items"][0];
+            assert!(row.get("imageUrl").is_none(),"accepted {bad:?}");
+            assert_eq!(row["titleId"],"7");assert_eq!(row["name"],"Legacy");
+            assert_eq!(row["achievementsUnlocked"],2);assert_eq!(row["currentGamerscore"],20);
+        }
+    }
+    #[test]fn recent_games_upgrade_http_artwork_without_hiding_the_title(){
+        let value=json!({"titles":[{"titleId":"7","name":"Legacy","type":"Game","displayImage":"http://store-images.microsoft.com/image/apps/a",
+            "titleHistory":{"lastTimePlayed":"2026-10-23T12:34:56Z"},"achievement":{"currentAchievements":2,"totalAchievements":10,"currentGamerscore":20,"totalGamerscore":100}}]});
+        let page=people_games(&value).unwrap();let row=&page["items"][0];
+        assert_eq!(row["imageUrl"],"https://store-images.microsoft.com/image/apps/a");
+        assert_eq!(row["titleId"],"7");assert_eq!(row["achievementsUnlocked"],2);assert_eq!(row["lastPlayed"],"2026-10-23T12:34:56+00:00");
+        for bad in ["https://user@store-images.microsoft.com/image","https://store-images.microsoft.com:444/image",
+            "ftp://store-images.s-microsoft.com/image","https://example.test/image"]{
+            let mut copy=value.clone();copy["titles"][0]["displayImage"]=json!(bad);
+            let page=people_games(&copy).unwrap();assert!(page["items"][0].get("imageUrl").is_none());assert_eq!(page["items"][0]["titleId"],"7");
+        }
     }
     #[test]fn gamer_pictures_are_bound_to_xbox_image_hosts_and_modern_tags_keep_their_suffix(){
         let rows=friends(&json!({"people":[{"xuid":"2","modernGamertag":"Player","modernGamertagSuffix":"1234","displayPicRaw":"https://gamerpic.xboxlive.com/picture.png"}]})).unwrap();
