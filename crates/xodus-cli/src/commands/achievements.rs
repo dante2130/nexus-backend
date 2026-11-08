@@ -32,6 +32,18 @@ fn number(value: &Value) -> Option<f64> {
     s.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0)
 }
 
+// REST currentPercentage is already expressed in percentage points.
+fn rarity(value: &Value) -> Option<Value> {
+    let percentage = value["currentPercentage"].as_f64()
+        .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))?;
+    let category = match value["currentCategory"].as_str() {
+        Some("Rare") => "Rare",
+        Some("Common") => "Common",
+        _ => return None,
+    };
+    Some(json!({"percentage":percentage,"category":category}))
+}
+
 fn achievement(value: &Value, title_id: u32) -> Result<Value, &'static str> {
     let id = short(&value["id"],128).filter(|s| !s.is_empty()).ok_or("achievement-id")?;
     let service = value["serviceConfigId"].as_str().filter(|s| scid(s)).ok_or("achievement-service")?;
@@ -66,7 +78,7 @@ fn achievement(value: &Value, title_id: u32) -> Result<Value, &'static str> {
     let icon = value["mediaAssets"].as_array().and_then(|v| v.iter().take(20)
         .filter(|asset| asset["type"].as_str() == Some("Icon")).find_map(|asset| safe_icon(&asset["url"])));
     Ok(json!({"id":format!("{}:{id}",service.to_ascii_lowercase()),"name":name,"description":description,
-        "state":state,"secret":secret,"revoked":revoked,"gamerscore":score,"unlockedAt":date,"iconUrl":icon,"progress":progress}))
+        "state":state,"secret":secret,"revoked":revoked,"gamerscore":score,"unlockedAt":date,"iconUrl":icon,"progress":progress,"rarity":rarity(&value["rarity"])}))
 }
 
 fn page(value: &Value, title: u32) -> Result<(Vec<Value>,Option<String>,bool), &'static str> {
@@ -188,6 +200,21 @@ pub async fn run(tokens: &TokenManager, title_id: u32, json_output: bool, langua
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn rarity_preserves_percentage_points_and_server_category() {
+        for percent in [0.0, 0.27, 10.9, 100.0] {
+            assert_eq!(rarity(&json!({"currentPercentage":percent,"currentCategory":"Rare"})),
+                Some(json!({"percentage":percent,"category":"Rare"})));
+        }
+        for value in [Value::Null, json!({}), json!({"currentPercentage":true,"currentCategory":"Rare"}),
+            json!({"currentPercentage":-1,"currentCategory":"Rare"}),
+            json!({"currentPercentage":101,"currentCategory":"Rare"}),
+            json!({"currentPercentage":2,"currentCategory":"Unset"})] {
+            assert!(rarity(&value).is_none());
+        }
+        let mut input = row();
+        input["rarity"] = json!({"currentPercentage":101,"currentCategory":"Rare"});
+        assert!(achievement(&input,42).unwrap()["rarity"].is_null());
+    }
     #[test] fn language_tags_reject_header_injection() {
         for tag in ["en-US", "uk-UA", "ru-RU", "pt-BR", "zh-CN"] { assert!(valid_language(tag)); }
         for tag in ["", "en", "../en-US", "en-US\r\nX: y", "en-US,ru-RU"] { assert!(!valid_language(tag)); }
