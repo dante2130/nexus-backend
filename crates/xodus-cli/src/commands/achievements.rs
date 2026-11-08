@@ -1,5 +1,5 @@
 //! Read-only Xbox Achievements V2. Never emits achievement progress or unlock writes.
-use std::{collections::HashSet, process::ExitCode, time::Duration};
+use std::{collections::{HashMap, HashSet}, process::ExitCode, time::Duration};
 use serde_json::{Value, json};
 use xodus::tokens::TokenManager;
 use super::profile::{bounded, xbox_session};
@@ -92,7 +92,52 @@ fn valid_language(language: &str) -> bool {
         && parts.iter().all(|part| part.bytes().all(|c| c.is_ascii_alphabetic()))
 }
 
-async fn lookup(tokens: &TokenManager, title: u32, language: &str) -> Result<Value, &'static str> {
+// The BaseGame completion group is supplied by Xbox, never inferred from score.
+fn mythic_completion(value: &Value, title: u32) -> Option<Value> {
+    for completion in value["completion"].as_array()?.iter().take(100) {
+        if !title_matches(&completion["titleId"], title) { continue; }
+        for (id, group) in completion["groups"].as_object()?.iter().take(100) {
+            if group["groupType"] != "BaseGame" { continue; }
+            if id.is_empty() || id.len() > 180 { return None; }
+            let ids = group["achievementIds"].as_array().filter(|v| !v.is_empty() && v.len() <= 500)?;
+            let unlocked = group["unlockedAchievementIds"].as_array().filter(|v| v.len() <= 500)?;
+            let collect = |values: &[Value]| -> Option<HashSet<String>> {
+                let mut found = HashSet::new();
+                for value in values {
+                    let text = value.as_str().filter(|s| !s.is_empty() && s.len() <= 180 && !s.chars().any(char::is_control))?;
+                    if !found.insert(text.to_owned()) { return None; }
+                }
+                Some(found)
+            };
+            let all = collect(ids)?;
+            let earned = collect(unlocked)?;
+            if !earned.is_subset(&all) { return None; }
+            let complete = group["isComplete"].as_bool()?;
+            let completed_at = group["completedTime"].as_str().and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()).map(|v| v.to_rfc3339());
+            return Some(json!({"groupId":id,"unlocked":complete,"unlockedCount":earned.len(),
+                "totalCount":all.len(),"completedTime":completed_at,"achievementIds":ids}));
+        }
+    }
+    None
+}
+
+fn attach_mythic(items: &mut [Value], completion: &Value) {
+    let Some(base_ids) = completion["achievementIds"].as_array() else { return; };
+    let mut occurrences = HashMap::<String, usize>::new();
+    for item in items.iter() {
+        if let Some(raw_id) = item["id"].as_str().and_then(|id| id.rsplit(':').next()) {
+            *occurrences.entry(raw_id.to_owned()).or_default() += 1;
+        }
+    }
+    for item in items {
+        let Some(raw_id) = item["id"].as_str().and_then(|id| id.rsplit(':').next()) else { continue; };
+        if occurrences.get(raw_id) != Some(&1) { continue; }
+        let is_base = base_ids.iter().any(|id| id.as_str() == Some(raw_id));
+        item["baseGame"] = json!(is_base);
+    }
+}
+
+async fn lookup(tokens: &TokenManager, title: u32, language: &str, include_mythic: bool) -> Result<Value, &'static str> {
     let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     let (client,authorization,account) = xbox_session(tokens).await?;
     let response = client.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag")
@@ -102,13 +147,16 @@ async fn lookup(tokens: &TokenManager, title: u32, language: &str) -> Result<Val
     let users = profile["profileUsers"].as_array().filter(|v| v.len() == 1).ok_or("profile-count")?;
     let xuid = users[0]["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 20 && s.bytes().all(|c| c.is_ascii_digit()) && s.parse::<u64>().is_ok_and(|n| n>0)).ok_or("profile-id")?;
     let mut items = Vec::new(); let mut token: Option<String> = None; let mut seen = HashSet::new(); let mut ids = HashSet::new(); let mut partial = false;
+    let mut mythic: Option<Value> = None;
     for index in 0..10 {
         let mut url = reqwest::Url::parse(&format!("https://achievements.xboxlive.com/users/xuid({xuid})/achievements")).map_err(|_| "request-url")?;
         url.query_pairs_mut().append_pair("titleId",&title.to_string()).append_pair("types","Persistent").append_pair("maxItems","100");
+        if include_mythic { url.query_pairs_mut().append_pair("possibleOnly","true"); }
         if let Some(ref next) = token { url.query_pairs_mut().append_pair("continuationToken",next); }
-        let response = client.get(url).header("Authorization",&authorization).header("x-xbl-contract-version","2")
+        let response = client.get(url).header("Authorization",&authorization).header("x-xbl-contract-version",if include_mythic { "6" } else { "2" })
             .header("Accept-Language",language).send().await.map_err(|_| "achievements-request")?;
         let body: Value = serde_json::from_slice(&bounded(response,2*1024*1024).await?).map_err(|_| "achievements-json")?;
+        if include_mythic && mythic.is_none() { mythic = mythic_completion(&body,title); }
         let (rows,next,omitted) = page(&body,title)?; partial |= omitted;
         for row in rows {
             if !ids.insert(row["id"].as_str().ok_or("achievement-id")?.to_owned()) { return Err("achievement-duplicate"); }
@@ -121,13 +169,14 @@ async fn lookup(tokens: &TokenManager, title: u32, language: &str) -> Result<Val
         token = Some(next);
     }
     tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
-    Ok(json!({"schema":1,"account":account,"titleId":title.to_string(),"items":items,"partial":partial}))
+    if let Some(ref completion) = mythic { attach_mythic(&mut items,completion); }
+    Ok(json!({"schema":1,"account":account,"titleId":title.to_string(),"items":items,"partial":partial,"mythic":mythic}))
 }
 
-pub async fn run(tokens: &TokenManager, title_id: u32, json_output: bool, language: &str) -> ExitCode {
+pub async fn run(tokens: &TokenManager, title_id: u32, json_output: bool, language: &str, include_mythic: bool) -> ExitCode {
     if !valid_language(language) { eprintln!("Xbox achievements unavailable: invalid-language"); return ExitCode::FAILURE; }
     if title_id == 0 { eprintln!("Xbox achievements unavailable: invalid-title"); return ExitCode::FAILURE; }
-    match tokio::time::timeout(Duration::from_secs(30),lookup(tokens,title_id,language)).await {
+    match tokio::time::timeout(Duration::from_secs(30),lookup(tokens,title_id,language,include_mythic)).await {
         Ok(Ok(value)) => {
             if json_output { println!("{value}"); } else { println!("{} achievements",value["items"].as_array().map_or(0,Vec::len)); }
             ExitCode::SUCCESS
@@ -142,6 +191,35 @@ mod tests {
     #[test] fn language_tags_reject_header_injection() {
         for tag in ["en-US", "uk-UA", "ru-RU", "pt-BR", "zh-CN"] { assert!(valid_language(tag)); }
         for tag in ["", "en", "../en-US", "en-US\r\nX: y", "en-US,ru-RU"] { assert!(!valid_language(tag)); }
+    }
+    fn completion(complete: bool) -> Value { json!({"completion":[{"titleId":"42","groups":{
+        "base":{"groupType":"BaseGame","achievementIds":["1","2"],"unlockedAchievementIds":["1"],"isComplete":complete,"completedTime":null},
+        "dlc":{"groupType":"AddOn","achievementIds":["3"],"unlockedAchievementIds":[],"isComplete":false}
+    }}]}) }
+    #[test] fn mythic_uses_only_the_matching_server_base_game_group() {
+        let value = mythic_completion(&completion(false),42).unwrap();
+        assert_eq!(value["totalCount"],2); assert_eq!(value["unlockedCount"],1); assert_eq!(value["unlocked"],false);
+        assert!(mythic_completion(&completion(false),43).is_none());
+        assert!(mythic_completion(&json!({}),42).is_none());
+        assert_eq!(mythic_completion(&completion(true),42).unwrap()["unlocked"],true);
+    }
+    #[test] fn mythic_never_guesses_completion_or_accepts_invalid_membership() {
+        let mut value=completion(false);
+        value["completion"][0]["groups"]["base"]["unlockedAchievementIds"]=json!(["1","2"]);
+        assert_eq!(mythic_completion(&value,42).unwrap()["unlocked"],false);
+        value["completion"][0]["groups"]["base"]["unlockedAchievementIds"]=json!(["3"]);
+        assert!(mythic_completion(&value,42).is_none());
+        value["completion"][0]["groups"]["base"]["unlockedAchievementIds"]=json!(["1","1"]);
+        assert!(mythic_completion(&value,42).is_none());
+    }
+    #[test] fn mythic_marks_originals_and_excludes_addons() {
+        let group=mythic_completion(&completion(false),42).unwrap();
+        let mut items=vec![json!({"id":"scid:1"}),json!({"id":"scid:3"})];
+        attach_mythic(&mut items,&group);
+        assert_eq!(items[0]["baseGame"],true);assert_eq!(items[1]["baseGame"],false);
+        let mut ambiguous=vec![json!({"id":"scid:1"}),json!({"id":"another-scid:1"})];
+        attach_mythic(&mut ambiguous,&group);
+        assert!(ambiguous[0]["baseGame"].is_null());assert!(ambiguous[1]["baseGame"].is_null());
     }
     fn row() -> Value { json!({"id":"1","serviceConfigId":"11111111-1111-4111-8111-111111111111","titleAssociations":[{"id":42}],"achievementType":"Persistent","name":"First step","description":"Unlocked","lockedDescription":"Do something","progressState":"Achieved","isSecret":false,"isRevoked":false,"rewards":[{"type":"Gamerscore","value":"10"}],"progression":{"timeUnlocked":"2026-01-01T12:00:00Z"},"mediaAssets":[{"type":"Icon","url":"https://images-eds-ssl.xboxlive.com/image"}]}) }
     #[test] fn reads_unlocked_and_missing_does_not_mean_zero() {
