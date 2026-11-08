@@ -124,7 +124,7 @@ runs `xodus-service --help`: that upstream binary starts device authentication
 instead of parsing a help option. Service identity is checked by its ELF/header
 and hashes; account/cloud/game functionality requires separate manual testing.
 
-The Electron launcher is MIT-licensed. The separately distributed Xodus backend
+The Electron launcher is MIT-licensed. The separately distributed Nexus backend
 retains its upstream GPLv3 license; dependency licenses and corresponding source
 are included with every candidate. No proprietary game files, credentials or
 saves are packaged.
