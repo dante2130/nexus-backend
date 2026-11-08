@@ -50,9 +50,11 @@ try {
   if (existing.flat().some(item => item.tag_name === tag)) throw Error('Release already exists');
   const tags = JSON.parse(command('gh', ['api', '--paginate', '--slurp', `repos/${repo}/tags?per_page=100`]));
   if (tags.flat().some(item => item.name === tag)) throw Error('Tag already exists');
+  // Public release display title only. Tags, asset filenames and approvals stay unchanged.
+  const releaseTitle = `Nexus backend ${tag.slice('backend-v'.length)}`;
   command('gh', ['release', 'create', tag, '--repo', repo, '--target', run.head_sha,
     ...manifest.files.map(file => path.join(directory, file.name)), path.join(directory, 'candidate.json'),
     ...(kind === 'launcher' ? [] : ['--latest=false']),
-    '--title', `Xodus Nexus ${kind} ${kind === 'backend' ? tag.slice('backend-v'.length) : tag}`, '--notes', notes]);
+    '--title', releaseTitle, '--notes', notes]);
   console.log(`Promoted approved ${kind} candidate ${runId} as ${tag}; no rebuild performed.`);
 } finally { await fs.rm(directory, { recursive: true, force: true }); }
