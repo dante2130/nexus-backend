@@ -86,7 +86,13 @@ fn page(value: &Value, title: u32) -> Result<(Vec<Value>,Option<String>,bool), &
     Ok((items,token,partial))
 }
 
-async fn lookup(tokens: &TokenManager, title: u32) -> Result<Value, &'static str> {
+fn valid_language(language: &str) -> bool {
+    let parts: Vec<_> = language.split('-').collect();
+    parts.len() == 2 && (2..=3).contains(&parts[0].len()) && parts[1].len() == 2
+        && parts.iter().all(|part| part.bytes().all(|c| c.is_ascii_alphabetic()))
+}
+
+async fn lookup(tokens: &TokenManager, title: u32, language: &str) -> Result<Value, &'static str> {
     let snapshot=tokens.user_token_snapshot().map_err(|_|"account-changed")?;
     let (client,authorization,account) = xbox_session(tokens).await?;
     let response = client.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag")
@@ -101,7 +107,7 @@ async fn lookup(tokens: &TokenManager, title: u32) -> Result<Value, &'static str
         url.query_pairs_mut().append_pair("titleId",&title.to_string()).append_pair("types","Persistent").append_pair("maxItems","100");
         if let Some(ref next) = token { url.query_pairs_mut().append_pair("continuationToken",next); }
         let response = client.get(url).header("Authorization",&authorization).header("x-xbl-contract-version","2")
-            .header("Accept-Language","en-US").send().await.map_err(|_| "achievements-request")?;
+            .header("Accept-Language",language).send().await.map_err(|_| "achievements-request")?;
         let body: Value = serde_json::from_slice(&bounded(response,2*1024*1024).await?).map_err(|_| "achievements-json")?;
         let (rows,next,omitted) = page(&body,title)?; partial |= omitted;
         for row in rows {
@@ -118,9 +124,10 @@ async fn lookup(tokens: &TokenManager, title: u32) -> Result<Value, &'static str
     Ok(json!({"schema":1,"account":account,"titleId":title.to_string(),"items":items,"partial":partial}))
 }
 
-pub async fn run(tokens: &TokenManager, title_id: u32, json_output: bool) -> ExitCode {
+pub async fn run(tokens: &TokenManager, title_id: u32, json_output: bool, language: &str) -> ExitCode {
+    if !valid_language(language) { eprintln!("Xbox achievements unavailable: invalid-language"); return ExitCode::FAILURE; }
     if title_id == 0 { eprintln!("Xbox achievements unavailable: invalid-title"); return ExitCode::FAILURE; }
-    match tokio::time::timeout(Duration::from_secs(30),lookup(tokens,title_id)).await {
+    match tokio::time::timeout(Duration::from_secs(30),lookup(tokens,title_id,language)).await {
         Ok(Ok(value)) => {
             if json_output { println!("{value}"); } else { println!("{} achievements",value["items"].as_array().map_or(0,Vec::len)); }
             ExitCode::SUCCESS
@@ -132,6 +139,10 @@ pub async fn run(tokens: &TokenManager, title_id: u32, json_output: bool) -> Exi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn language_tags_reject_header_injection() {
+        for tag in ["en-US", "uk-UA", "ru-RU", "pt-BR", "zh-CN"] { assert!(valid_language(tag)); }
+        for tag in ["", "en", "../en-US", "en-US\r\nX: y", "en-US,ru-RU"] { assert!(!valid_language(tag)); }
+    }
     fn row() -> Value { json!({"id":"1","serviceConfigId":"11111111-1111-4111-8111-111111111111","titleAssociations":[{"id":42}],"achievementType":"Persistent","name":"First step","description":"Unlocked","lockedDescription":"Do something","progressState":"Achieved","isSecret":false,"isRevoked":false,"rewards":[{"type":"Gamerscore","value":"10"}],"progression":{"timeUnlocked":"2026-01-01T12:00:00Z"},"mediaAssets":[{"type":"Icon","url":"https://images-eds-ssl.xboxlive.com/image"}]}) }
     #[test] fn reads_unlocked_and_missing_does_not_mean_zero() {
         let v=achievement(&row(),42).unwrap(); assert_eq!(v["state"],"unlocked");assert_eq!(v["gamerscore"],10);assert!(v["unlockedAt"].is_string());

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "version": "0.2.15",
-  "repository": "domsvoboda/nexus-backend",
+  "repository": "dante2130/nexus-backend",
   "upstream": {
     "repository": "https://github.com/xodus-gaming/xodus.git",
     "commit": "53ea781dcd073e31d7ea68e894134e9c959bff04"

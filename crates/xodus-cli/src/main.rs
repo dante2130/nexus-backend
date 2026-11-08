@@ -133,6 +133,8 @@ enum SubCommand {
         title_id: u32,
         #[arg(long)]
         json: bool,
+        #[arg(long, default_value = "en-US", help = "Language for achievement names and descriptions")]
+        language: String,
     },
     #[command(about = "Read account product entitlements without starting sign-in")]
     Library {
@@ -430,7 +432,7 @@ async fn main() -> ExitCode {
         SubCommand::NativeSocial { action } => commands::native_social::run(&tokens,action).await,
         SubCommand::Social { .. } => commands::social::run(&tokens).await,
         SubCommand::GameActivity { title_id, json } => commands::game_activity::run(&tokens, title_id, json).await,
-        SubCommand::Achievements { title_id, json } => commands::achievements::run(&tokens, title_id, json).await,
+        SubCommand::Achievements { title_id, json, language } => commands::achievements::run(&tokens, title_id, json, &language).await,
         SubCommand::Login { player } => commands::login::run(&client, &tokens, player).await,
         SubCommand::Logout { device, player } => commands::logout::run(&tokens, device, player).await,
         SubCommand::Extract {
