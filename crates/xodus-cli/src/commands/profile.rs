@@ -4,7 +4,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use serde_json::{Value, json};
 use xodus::{models::{live::ExchangeUserTokenOutcome, secrets::Token, soap}, tokens::TokenManager};
 
-const PROFILE: &str = "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,PublicGamerpic";
+const PROFILE: &str = "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,PublicGamerpic,Gamerscore";
 const MAX_IMAGE: usize = 2 * 1024 * 1024;
 
 pub(super) async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, &'static str> {
@@ -37,6 +37,17 @@ fn fields(value: &Value) -> Result<(String, Option<reqwest::Url>), &'static str>
     let gamertag = setting("Gamertag").map(str::trim).filter(|name| !name.is_empty()
         && name.len() <= 256 && !name.chars().any(char::is_control)).ok_or("gamertag")?;
     Ok((gamertag.to_owned(), setting("PublicGamerpic").and_then(picture_url)))
+}
+
+fn gamerscore(value: &Value) -> Option<u32> {
+    let users = value["profileUsers"].as_array()?;
+    if users.len() != 1 { return None; }
+    let settings = users[0]["settings"].as_array()?;
+    let entries: Vec<_> = settings.iter().filter(|item| item["id"] == "Gamerscore").collect();
+    if entries.len() != 1 { return None; }
+    let raw = entries[0]["value"].as_str()?;
+    if raw.is_empty() || raw.len() > 10 || !raw.bytes().all(|c| c.is_ascii_digit()) { return None; }
+    raw.parse::<u32>().ok()
 }
 
 fn image_data(bytes: &[u8]) -> Option<String> {
@@ -126,7 +137,9 @@ async fn profile(tokens: &TokenManager, license: bool) -> Result<Value, &'static
         .header("x-xbl-contract-version", "2").send().await.map_err(|_| "profile-request")?;
     if response.status().as_u16()==401 && !license {invalidate_social_session(tokens);}
     let body = bounded(response, 128 * 1024).await?;
-    let (gamertag, picture) = fields(&serde_json::from_slice(&body).map_err(|_| "profile-json")?)?;
+    let data: Value = serde_json::from_slice(&body).map_err(|_| "profile-json")?;
+    let (gamertag, picture) = fields(&data)?;
+    let gamerscore = gamerscore(&data);
     // Fresh request, no Authorization/Signature or redirects to the image CDN.
     let image = if let Some(url) = picture {
         match client.get(url).send().await {
@@ -135,7 +148,7 @@ async fn profile(tokens: &TokenManager, license: bool) -> Result<Value, &'static
         }
     } else { None };
     tokens.validate_user_token_snapshot(&snapshot).map_err(|_|"account-changed")?;
-    Ok(json!({ "schema": 1, "account": account, "gamertag": gamertag, "gamerpicDataUrl": image }))
+    Ok(json!({ "schema": 1, "account": account, "gamertag": gamertag, "gamerpicDataUrl": image, "gamerscore": gamerscore }))
 }
 
 pub async fn run(tokens: &TokenManager, json_output: bool, license: bool) -> ExitCode {
@@ -182,6 +195,18 @@ mod tests {
         tokens.cache_xsts(&first,&value);assert!(tokens.get_cached_xsts(&first).is_some());
         tokens.remove_cached_xsts(&first);assert!(tokens.get_cached_xsts(&first).is_none());
     }
+    #[test]
+    fn gamerscore_is_optional_validated_and_zero_is_not_missing() {
+        for score in ["0", "123456", "4294967295"] {
+            assert_eq!(gamerscore(&json!({"profileUsers":[{"settings":[{"id":"Gamerscore","value":score}]}]})), score.parse::<u32>().ok());
+        }
+        for score in [json!(null), json!(true), json!(12), json!("-1"), json!("1.2"), json!("4294967296"), json!(""), json!(" 1")] {
+            assert_eq!(gamerscore(&json!({"profileUsers":[{"settings":[{"id":"Gamerscore","value":score}]}]})), None);
+        }
+        assert_eq!(gamerscore(&json!({"profileUsers":[{"settings":[]}]})), None);
+        assert_eq!(gamerscore(&json!({"profileUsers":[{"settings":[{"id":"Gamerscore","value":"1"},{"id":"Gamerscore","value":"2"}]}]})), None);
+    }
+
     #[test]
     fn profile_settings_are_validated_without_exposing_other_fields() {
         let value = json!({"profileUsers":[{"id":"private-id", "settings":[
