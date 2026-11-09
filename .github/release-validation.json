@@ -1,1 +1,17 @@
-{"schema":1,"approvals":[]}
+{
+  "schema": 1,
+  "approvals": [
+    {
+      "kind": "backend",
+      "repository": "domsvoboda/nexus-backend",
+      "runId": "42666289064",
+      "commit": "e7884a27f698c7447b96b431b2935f9ed50677f5",
+      "manifestSha256": "207532368c5655bcaadb2026834a2854bb3b9999e82e5e238f50c18111f08fd8",
+      "notesSha256": "90153c6996a5d1ed39b40721d8d231250f539b4501087949932fe1ae275c62be",
+      "approved": true,
+      "approvedBy": "domsvoboda",
+      "realGameTest": false,
+      "evidence": "Explicit production authorization on 2026-11-09 to build the launcher and backend anew and publish the reviewed 0.5 release. Successful main backend workflow 42666289064 built and tested the pinned e7884a27 source on Ubuntu 22.04 for x86_64 and aarch64, then produced one original merged candidate. Its exact candidate manifest, ten files, all SHA256 values, four binary/source SHA512 checksums, both schema-2 manifests, source/version/recipe bindings, licenses and ELF architectures were verified. The package compatibility is linux-run-v25 and authUi is electron; both binaries declare glibc 2.35 and their maximum imported GLIBC symbol version is 2.34. One isolated x86_64 xodus-cli --help check exited zero with the required capabilities. No service, account, authentication or real-game execution of these newly built backend binaries is claimed. Independent post-build metadata QA passed all 27 existing Node CI contract tests; only the release display title and its regression changed, with compiled source, Cargo lock and build configuration unchanged. Publish only these original CI assets, including corresponding source, with the exact digest-bound approved English notes. The launcher download/runtime-choice follow-up is independent of these unchanged backend build inputs. No rebuild or automatic local activation is authorized by this record."
+    }
+  ]
+}
