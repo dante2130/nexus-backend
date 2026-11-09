@@ -51,7 +51,7 @@ try {
   const tags = JSON.parse(command('gh', ['api', '--paginate', '--slurp', `repos/${repo}/tags?per_page=100`]));
   if (tags.flat().some(item => item.name === tag)) throw Error('Tag already exists');
   // Public release display title only. Tags, asset filenames and approvals stay unchanged.
-  const releaseTitle = `Nexus backend ${tag.slice('backend-v'.length)}`;
+  const releaseTitle = `Xodus Nexus backend ${tag.slice('backend-v'.length)}`;
   command('gh', ['release', 'create', tag, '--repo', repo, '--target', run.head_sha,
     ...manifest.files.map(file => path.join(directory, file.name)), path.join(directory, 'candidate.json'),
     ...(kind === 'launcher' ? [] : ['--latest=false']),

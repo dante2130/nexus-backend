@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import { releaseNotesRef, assertApprovedReleaseNotes } from './release-notes-policy.mjs';
 const commit = 'a'.repeat(40), notes = '# Release\n\nReviewed notes.\n';
 const approval = { notesSha256: createHash('sha256').update(notes).digest('hex') };
@@ -26,4 +27,12 @@ test('edited, empty or malformed approved text fails closed', () => {
 test('invalid component or candidate selection is rejected', () => {
   assert.throws(() => releaseNotesRef('other', commit, approval));
   assert.throws(() => releaseNotesRef('launcher', 'main', approval));
+});
+test('backend display title is Xodus Nexus while tag and assets stay stable', () => {
+  const source = fs.readFileSync(new URL('./promote-candidate.mjs', import.meta.url), 'utf8');
+  assert.match(source, /const releaseTitle = `Xodus Nexus backend \$\{tag\.slice\('backend-v'\.length\)\}`;/);
+  assert.match(source, /const tag = `backend-v\$\{config\.version\}`;/);
+  assert.match(source, /path\.join\(directory, 'candidate\.json'\)/);
+  assert.match(source, /'--target', run\.head_sha/);
+  assert.match(source, /manifest\.files\.map\(file => path\.join\(directory, file\.name\)\)/);
 });
